@@ -320,6 +320,19 @@
   <div class="slider" style="margin-top:12px"><span class="name">Size</span><input type="range" id="zoom" min="40" max="100" value="82"><span class="val" id="zoomo"></span></div>
 </div>
 
+<div class="card">
+  <h3>Guides</h3>
+  <div class="switchrow"><label for="grid">Layout grid</label>
+    <span class="switch"><input type="checkbox" id="grid"><span class="track"></span><span class="knob"></span></span></div>
+  <div id="gridbox" style="display:none">
+    <div class="switchrow"><label for="gridCols">16 columns</label>
+      <span class="switch"><input type="checkbox" id="gridCols" checked><span class="track"></span><span class="knob"></span></span></div>
+    <div class="switchrow"><label for="gridRows">8 rows</label>
+      <span class="switch"><input type="checkbox" id="gridRows" checked><span class="track"></span><span class="knob"></span></span></div>
+  </div>
+  <div class="sub">Preview only — never drawn into the exported image. Hidden while Trim to device is on, which crops the frame away.</div>
+</div>
+
 <div class="card" id="card-nudge" style="display:none">
   <h3>Nudge</h3>
   <div class="slider"><span class="name">Turn</span><input type="range" id="ary" min="-10" max="10" value="0"><span class="val" id="aryo"></span></div>
@@ -336,6 +349,18 @@
   <div class="swatches" style="margin-bottom:6px">
     <div class="swatch"><input type="color" id="body" value="#2b2b30">Body</div>
     <div class="swatch"><input type="color" id="bg" value="#f2f2f4">Canvas</div>
+  </div>
+  <div id="bgmoderow">
+    <div class="seg" id="bgmode"></div>
+    <div class="sub">Flat fill is a solid canvas colour. Studio sweep curves a lit floor up into a backdrop and reflects the phone in it.</div>
+    <div id="sweepbox" style="padding:6px 0 2px">
+      <div class="slider"><span class="name">Reflection</span><input type="range" id="reflect" min="0" max="100" value="55"><span class="val" id="reflecto"></span></div>
+      <div class="switchrow"><label for="highlight">Floor highlight</label>
+        <span class="switch"><input type="checkbox" id="highlight" checked><span class="track"></span><span class="knob"></span></span></div>
+      <div id="highlightbox">
+        <div class="slider"><span class="name">Strength</span><input type="range" id="highlightStrength" min="0" max="100" value="100"><span class="val" id="highlightStrengtho"></span></div>
+      </div>
+    </div>
   </div>
   <div class="switchrow"><label for="clay">Clay finish</label>
     <span class="switch"><input type="checkbox" id="clay"><span class="track"></span><span class="knob"></span></span></div>
@@ -373,6 +398,9 @@
 const DEVICES = {
   'iPhone 15 Pro': { w: 70.6, h: 146.6, d: 8.25, r: 12.5, bezel: 2.4, screenR: 10.5 },
   'iPhone 15 Pro Max': { w: 76.7, h: 159.9, d: 8.25, r: 13.5, bezel: 2.4, screenR: 11.5 },
+  // Deliberately the same millimetres as STUDIO_FRAG's hardcoded body (W, H, D,
+  // CORNER, BEZEL, SCREEN_R), so clay and studio finally agree on one phone.
+  'iPhone 13': { w: 71.5, h: 146.7, d: 7.65, r: 12.0, bezel: 2.4, screenR: 9.6 },
   'Pixel 8': { w: 70.8, h: 150.5, d: 8.9, r: 10.5, bezel: 2.7, screenR: 8 },
   'Galaxy S24': { w: 70.6, h: 147, d: 7.6, r: 8, bezel: 2.2, screenR: 6.5 }
 };
@@ -1043,9 +1071,157 @@ void main() {
 }
 `;
 
+// Studio Sweep: a cyclorama backdrop -- floor running back into a quarter-round
+// curve and up into a wall -- with the device's reflection marched off the
+// floor. Kept as its own program rather than a branch in STUDIO_FRAG because
+// deviceBounds is a pixel scan of the device layer, and an opaque background
+// coming out of that shader would swallow the silhouette whole and break Trim.
+//
+// Self-contained on purpose. The reflection needs only a silhouette, so it
+// marches the chassis prism alone -- no buttons, cuts, bump or notch -- which
+// keeps the whole SDF down to two short functions instead of importing the
+// device shader's. Tuned against a numpy prototype first: a screen-space flip of
+// the rendered device was measured against a true mirror and came out 25px off
+// at the default preset and 47px at strong tilt, worst exactly at the contact
+// line, so it was thrown away in favour of marching the real thing.
+const BACKDROP_FRAG = `
+precision highp float;
+
+uniform vec2  uRes;
+uniform mat3  uRotT;     // world -> object, for the reflection march
+uniform float uCamZ, uTanHalf, uAspect;
+uniform float uGround;   // ground plane y, world millimetres
+uniform vec3  uTint;     // the Canvas swatch
+uniform vec3  uFinish;   // so a Silver phone reflects lighter than a Midnight one
+uniform float uReflect;  // reflection strength, 0..1
+uniform float uPool;     // floor highlight, 0..1; 0 leaves the floor evenly lit
+
+const float W = 71.5, H = 146.7, D = 7.65;
+const float CORNER = 12.0, EDGE = 1.15;
+
+// The sweep, in millimetres. The curve is the whole point: a cyclorama has no
+// seam, so the eye never finds a horizon line, only a gradient.
+const float SWEEP_Z = 150.0, SWEEP_R = 400.0;
+const float POOL_Z = -40.0, POOL_SIGMA = 130.0;
+const float REFL_LEN = 120.0;
+
+// Same two values environment() mixes between in STUDIO_FRAG, so the backdrop
+// and the tones the device is reflecting come from one place.
+const vec3 SWEEP_LO = vec3(0.075, 0.078, 0.086);
+const vec3 SWEEP_HI = vec3(0.17, 0.175, 0.195);
+const float SWEEP_EXP = 2.25;
+
+const float BIG = 1e9;
+
+float sdRRect(vec2 p, vec2 half_, float r) {
+  vec2 q = abs(p) - half_ + r;
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
+  float d2 = sdRRect(p.xy, halfWH - edge, max(corner - edge, 0.01));
+  float wz = abs(p.z) - (halfD - edge);
+  return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - edge;
+}
+
+vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
+
+// Floor, quarter cylinder and wall, nearest hit wins. No branching on the ray,
+// so it stays one straight path per pixel.
+float sweepHit(vec3 ro, vec3 rd, out vec3 p, out vec3 n) {
+  float cy = uGround + SWEEP_R;
+  float cz = -SWEEP_Z;
+
+  float dy = abs(rd.y) < 1e-9 ? 1e-9 : rd.y;
+  float tFloor = (uGround - ro.y) / dy;
+  if (tFloor <= 0.0 || ro.z + tFloor * rd.z < -SWEEP_Z) tFloor = BIG;
+
+  float dz = abs(rd.z) < 1e-9 ? 1e-9 : rd.z;
+  float tWall = (-(SWEEP_Z + SWEEP_R) - ro.z) / dz;
+  if (tWall <= 0.0 || ro.y + tWall * rd.y < cy) tWall = BIG;
+
+  float oy = ro.y - cy, oz = ro.z - cz;
+  float a = max(rd.y * rd.y + rd.z * rd.z, 1e-12);
+  float b = 2.0 * (oy * rd.y + oz * rd.z);
+  float c = oy * oy + oz * oz - SWEEP_R * SWEEP_R;
+  float disc = b * b - 4.0 * a * c;
+  // The camera sits inside the cylinder, so the forward root is the far one.
+  float tCurve = (-b + sqrt(max(disc, 0.0))) / (2.0 * a);
+  float qy = ro.y + tCurve * rd.y;
+  float qz = ro.z + tCurve * rd.z;
+  if (disc <= 0.0 || tCurve <= 0.0 || qy < uGround || qy > cy || qz > -SWEEP_Z) tCurve = BIG;
+
+  float t = min(min(tFloor, tWall), tCurve);
+  p = ro + rd * t;
+  if (t == tFloor)      n = vec3(0.0, 1.0, 0.0);
+  else if (t == tWall)  n = vec3(0.0, 0.0, 1.0);
+  else                  n = normalize(vec3(0.0, cy - p.y, cz - p.z));
+  return t;
+}
+
+// Sphere-trace the chassis prism. Distance travelled, or -1 for a miss.
+float marchBody(vec3 ro, vec3 rd) {
+  float t = 0.0;
+  for (int i = 0; i < 40; i++) {
+    float d = sdPrism(ro + rd * t, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+    if (d < 0.05) return t;
+    t += max(d, 0.05) * 0.9;
+    if (t > REFL_LEN) break;
+  }
+  return -1.0;
+}
+
+void main() {
+  // Identical ray setup to STUDIO_FRAG, so the floor meets the phone exactly
+  // where the raymarcher put it down.
+  vec2 ndc = vec2((gl_FragCoord.x / uRes.x) * 2.0 - 1.0,
+                  1.0 - (gl_FragCoord.y / uRes.y) * 2.0);
+  ndc.y = -ndc.y;
+  vec3 rd = normalize(vec3(ndc.x * uTanHalf * uAspect, ndc.y * uTanHalf, -1.0));
+  vec3 ro = vec3(0.0, 0.0, uCamZ);
+
+  vec3 p, n;
+  float t = sweepHit(ro, rd, p, n);
+  float valid = step(t, BIG * 0.5);
+
+  float up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+  vec3 col = mix(SWEEP_LO, SWEEP_HI, up) * SWEEP_EXP;
+
+  // A light pool on the floor. Without it the floor's normal never changes, the
+  // colour is flat across the whole plane, and it reads as paper rather than a
+  // lit surface.
+  float r2 = (p.x * p.x + (p.z - POOL_Z) * (p.z - POOL_Z))
+             / (2.0 * POOL_SIGMA * POOL_SIGMA);
+  // Interpolated toward 1.0 rather than scaling the 0.85 term, because the pool
+  // both lifts the centre and drops the periphery: scaling it would collapse to
+  // col *= 0.62 at zero and read as the lights going out, not as no highlight.
+  col *= mix(1.0, 0.62 + 0.85 * exp(-clamp(r2, 0.0, 60.0)), uPool);
+  col = mix(col * 0.62, col, valid);
+
+  vec3 outc = encode(col);
+
+  // Reflection as a reflected ray off the sweep, not a mirrored camera: same
+  // geometry, but it confines itself to surfaces that can actually reflect and
+  // carries onto the curve for free.
+  if (uReflect > 0.001 && valid > 0.5) {
+    float th = marchBody(uRotT * p, uRotT * reflect(rd, n));
+    if (th >= 0.0) {
+      float fade = clamp(1.0 - th / REFL_LEN, 0.0, 1.0);
+      float lum = clamp(dot(uFinish, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+      outc *= 1.0 - fade * fade * uReflect * (1.0 - lum);
+    }
+  }
+
+  // Structure from the sweep, hue from the Canvas swatch, so that control stays
+  // live in this mode instead of going dead.
+  float l = (outc.r + outc.g + outc.b) / 3.0;
+  gl_FragColor = vec4(clamp(uTint * (0.45 + 1.25 * l), 0.0, 1.0), 1.0);
+}
+`;
+
 const glCanvas = document.createElement('canvas');
 const gl = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true, antialias: false });
-let program = null, assetProgram = null, studioProgram = null, texture = null, hasTexture = false;
+let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, texture = null, hasTexture = false;
 
 function buildProgram(fragSrc) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
@@ -1068,6 +1244,7 @@ function initGL() {
   program = buildProgram(FRAG);
   assetProgram = buildProgram(ASSET_FRAG);
   studioProgram = buildProgram(STUDIO_FRAG);
+  backdropProgram = buildProgram(BACKDROP_FRAG);
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -1237,13 +1414,6 @@ async function loadBuiltIn() {
   }
   if (!state.bundle) state.bundle = Object.keys(BUNDLES)[0] || null;
   refreshAssetChips();
-
-const FINISH_SWATCH = { Silver: '#A9B4C6', Midnight: '#4C4F57', Pink: '#DBAFB2', Gold: '#DBBD86' };
-function refreshFinishChips() {
-  buildChips('finishes', Object.keys(FINISHES), k => { state.finish = k; },
-             state.finish, true);
-}
-refreshFinishChips();
   if (state.mode === 'asset') draw();
 }
 
@@ -1314,6 +1484,40 @@ const FINISHES = {
   Gold: [0.80, 0.68, 0.47]
 };
 
+// Draws the Studio Sweep backdrop straight onto the 2D context. Runs after the
+// device pass has already been copied out to its own layer, so clobbering
+// glCanvas here is safe -- and deliberately does not touch deviceBounds, which
+// has to keep meaning "the phone" for Trim.
+function paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundY) {
+  if (!gl || !backdropProgram) return;
+  glCanvas.width = W; glCanvas.height = H;
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(backdropProgram);
+  gl.disable(gl.BLEND);
+  const u = n => gl.getUniformLocation(backdropProgram, n);
+  gl.uniformMatrix3fv(u('uRotT'), false, new Float32Array([
+    Rt[0], Rt[3], Rt[6], Rt[1], Rt[4], Rt[7], Rt[2], Rt[5], Rt[8]
+  ]));
+  gl.uniform2f(u('uRes'), W, H);
+  gl.uniform1f(u('uCamZ'), camZ);
+  gl.uniform1f(u('uTanHalf'), tanHalf);
+  gl.uniform1f(u('uAspect'), W / H);
+  gl.uniform1f(u('uGround'), groundY);
+  const tint = hexToRgb(state.bg);
+  gl.uniform3f(u('uTint'), tint[0], tint[1], tint[2]);
+  const fin = FINISHES[state.finish] || FINISHES.Silver;
+  gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+  gl.uniform1f(u('uReflect'), (state.reflect != null ? state.reflect : 55) / 100);
+  const pool = state.highlight === false
+    ? 0
+    : (state.highlightStrength != null ? state.highlightStrength : 100) / 100;
+  gl.uniform1f(u('uPool'), pool);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  ctx.drawImage(glCanvas, 0, 0);
+}
+
 function renderStudio(canvas, W, H) {
   const ctx = canvas.getContext('2d');
   canvas.width = W; canvas.height = H;
@@ -1381,8 +1585,17 @@ function renderStudio(canvas, W, H) {
       .map(c => toPx(applyR(R, { x: c.x, y: c.y, z: 7.65 / 2 })));
   }
 
+  // Hoisted out of the shadow branch: the sweep needs the same silhouette to
+  // find the floor, and it is drawn whether or not the shadow is switched on.
+  const world = studioOutline3D(14).map(o => applyR(R, o));
+
+  // Backdrop first, so the shadow lands on the floor rather than under it.
+  // Transparent wins, matching how it suppresses the flat fill above.
+  if (state.bgMode === 'sweep' && !state.transparent) {
+    paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundPlaneY(world));
+  }
+
   if (state.shadow) {
-    const world = studioOutline3D(14).map(o => applyR(R, o));
     const cast = castToGround(world);
     const hull = convexHull(cast.map(toPx));
     paintShadow(ctx, hull, W, H, 1.0);
@@ -1665,6 +1878,7 @@ function shade(rgb, k) {
 const TILES = {
   'iPhone 15 Pro': '#3B7DF7',
   'iPhone 15 Pro Max': '#8B5CF6',
+  'iPhone 13': '#14B8A6',
   'Pixel 8': '#F97316',
   'Galaxy S24': '#0A0A0B'
 };
@@ -1672,6 +1886,11 @@ const TILES = {
 // Midnight's tile is darkened to match the graphite finish. Note this map is
 // consulted before FINISH_SWATCH, so it is the one that governs — editing the
 // swatch alone would silently change nothing.
+// Base layer under FINISH_TILES, covering every key in FINISHES. Lives here
+// rather than inside loadBuiltIn, where it used to sit: buildChips is top level,
+// so a const trapped in that function's body was unreachable from it however the
+// call stack looked, and the first uncovered finish threw on load.
+const FINISH_SWATCH = { Silver: '#A9B4C6', Midnight: '#4C4F57', Pink: '#DBAFB2', Gold: '#DBBD86' };
 const FINISH_TILES = { Blue: '#5E8FB5', Midnight: '#1F2126', Pink: '#D9A7A9' };
 
 const ASPECTS = [['4:5', 0.8], ['1:1', 1], ['4:3', 1.3333], ['16:9', 1.7778]];
@@ -1687,6 +1906,14 @@ state.fit = 'fill';
 state.shadowOpacity = 34; state.shadowSoft = 50;
 state.shadowAngle = 16; state.shadowHeight = 60; state.shadowContact = 88;
 state.photoRadius = 14;
+// Studio backdrop. 'flat' is the original solid fill and must stay the default,
+// so an existing mockup reopens looking exactly as it was saved.
+state.bgMode = 'flat';
+state.reflect = 55;
+// Full strength is exactly the old hardcoded pool, so a mockup saved before
+// these controls existed reopens looking the same.
+state.highlight = true;
+state.highlightStrength = 100;
 // Where the design sits inside the display. Part of the output, so it rides
 // along in the saved settings — unlike the preview viewport below.
 state.imgX = 0; state.imgY = 0; state.imgZoom = 100;
@@ -1710,6 +1937,16 @@ const stage = document.querySelector('.stage');
 // and the handles stay accurate at any zoom or pan offset.
 const view = { z: 1, tx: 0, ty: 0 };
 let spaceHeld = false;
+
+// --- layout guide ----------------------------------------------------------
+// Preview-only alignment grid. Kept off `state` for exactly the reason the
+// viewport above is: `state` is serialised into the Figma node on insert and
+// restored on refresh, so a guide switch left on there would follow the mockup
+// around forever. This is a property of looking, not of the output.
+const guides = { on: false, cols: true, rows: true };
+
+// Figma's layout-guide values, as configured for this project.
+const GUIDE = { cols: 16, rows: 8, margin: 64, gutter: 12, fill: 'rgba(255,0,0,0.1)' };
 
 function applyView() {
   preview.style.transform =
@@ -1784,11 +2021,18 @@ function lightDir() {
   return { x: l.x / m, y: l.y / m, z: l.z / m };
 }
 
-function castToGround(pts) {
-  const LIGHT = lightDir();
+// The plane the device stands on: the lowest point of the rotated silhouette,
+// with a hair of clearance. Pulled out of castToGround so the Studio Sweep floor
+// and the floor the shadow lands on are the same plane by construction rather
+// than by two copies of the same arithmetic agreeing.
+function groundPlaneY(pts) {
   let groundY = Infinity;
   for (const p of pts) groundY = Math.min(groundY, p.y);
-  groundY -= 0.6;
+  return groundY - 0.6;
+}
+
+function castToGround(pts) {
+  const groundY = groundPlaneY(pts);
   const L = lightDir();
   return pts.map(p => {
     const t = (groundY - p.y) / L.y;
@@ -2013,6 +2257,42 @@ function renderFramed(canvas, W, H) {
   }
 }
 
+// Drawn straight onto the preview canvas from draw(), never from inside a
+// render* function. The export path builds its own canvas and never calls
+// draw(), so the guide cannot reach the PNG by construction — a stronger
+// guarantee than the `canvas === preview` test drawHandles uses, which trim
+// already defeats by handing render() the trimCanvas instead.
+//
+// Positions are canvas pixels: view.z is a CSS transform on the element, so it
+// never enters the backing store. Filled bands rather than strokes, so there is
+// no line width needing to be divided back out either.
+function drawGuides(canvas) {
+  // Trim crops the frame away entirely, leaving the phone's bounding box — there
+  // is no frame left for a layout grid to divide.
+  if (!guides.on || state.trim) return;
+  const ctx = canvas.getContext('2d');
+  ctx.save();
+  ctx.fillStyle = GUIDE.fill;
+  if (guides.cols) guideBands(ctx, canvas.width, GUIDE.cols, true, canvas.height);
+  if (guides.rows) guideBands(ctx, canvas.height, GUIDE.rows, false, canvas.width);
+  ctx.restore();
+}
+
+// Figma's "Stretch" type: the run spans the frame minus a margin at each end,
+// and the bands share what is left with one gutter between each pair.
+function guideBands(ctx, extent, count, horizontal, across) {
+  const usable = extent - 2 * GUIDE.margin - (count - 1) * GUIDE.gutter;
+  // A narrow frame can be smaller than its own margins and gutters; without this
+  // the band width goes negative and the rects draw backwards.
+  if (count < 1 || usable <= 0) return;
+  const band = usable / count;
+  for (let i = 0; i < count; i++) {
+    const at = GUIDE.margin + i * (band + GUIDE.gutter);
+    if (horizontal) ctx.fillRect(at, 0, band, across);
+    else ctx.fillRect(0, at, across, band);
+  }
+}
+
 const PREVIEW_H = 900;
 function draw() {
   stage.classList.toggle('alpha', !!state.transparent);
@@ -2022,6 +2302,7 @@ function draw() {
   wantQuad = true;
   renderFramed(preview, Math.round(PREVIEW_H * state.aspect), PREVIEW_H);
   wantQuad = false;
+  drawGuides(preview);
 }
 
 // Chips: white pill, black when selected.
@@ -2064,13 +2345,37 @@ function refreshPresetChips() {
 function refreshDeviceChips() {
   buildChips('devices', Object.keys(DEVICES), k => { state.device = k; }, state.device, true);
 }
+// Reads FINISHES and state.finish only — nothing from the asset bundles — so it
+// belongs out here with the other chip builders rather than inside loadBuiltIn.
+function refreshFinishChips() {
+  buildChips('finishes', Object.keys(FINISHES), k => { state.finish = k; },
+             state.finish, true);
+}
 
 refreshPresetChips();
 refreshDeviceChips();
+// Called here, after the swatch maps are initialised, rather than from
+// loadBuiltIn. That loader only yields if BUILTIN is non-empty, so calling from
+// inside it would run before this point on an empty bundle set and hit the
+// const's temporal dead zone instead.
+refreshFinishChips();
 buildSeg('aspect', ASPECTS, v => { state.aspect = v; resetView(); draw(); }, state.aspect);
 buildSeg('scale', SCALES, v => { state.scale = v; }, state.scale);
 const FITS = [['Fill', 'fill'], ['Fit', 'fit'], ['Stretch', 'stretch']];
 buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
+const BGMODES = [['Flat fill', 'flat'], ['Studio sweep', 'sweep']];
+buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
+
+// The sweep is a studio-mode backdrop, and its slider is only meaningful when
+// the sweep is actually selected and not suppressed by a transparent canvas.
+// Called from the picker, from applyMode and from the restore path, so the panel
+// cannot be left showing for a mode that has no use for it.
+function applyBgMode() {
+  document.getElementById('bgmoderow').style.display =
+    state.mode === 'studio' ? 'block' : 'none';
+  document.getElementById('sweepbox').style.display =
+    (state.bgMode === 'sweep' && !state.transparent) ? 'block' : 'none';
+}
 
 const MODES = [['Clay', 'generated'], ['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo']];
 const LAYOUTS = [['Stacked', 'stacked'], ['Side by side', 'side']];
@@ -2104,6 +2409,7 @@ function applyMode() {
   document.getElementById('card-device').style.display = (asset || studio || photo) ? 'none' : 'block';
   document.getElementById('card-nudge').style.display = asset ? 'block' : 'none';
   document.getElementById('clay').closest('.switchrow').style.display = (asset || studio) ? 'none' : 'flex';
+  applyBgMode();
   draw();
 }
 
@@ -2185,7 +2491,7 @@ document.getElementById('files').addEventListener('change', async (e) => {
 });
 
 // Values borrow Fuse's trailing-digit treatment: the number is solid, the unit fades.
-const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%']];
+const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%']];
 function setVal(outId, v, unit) {
   document.getElementById(outId).innerHTML = '<b>' + v + '</b><i>' + unit + '</i>';
 }
@@ -2207,11 +2513,23 @@ syncSliders();
 ['body', 'bg'].forEach(id => {
   document.getElementById(id).addEventListener('input', e => { state[id] = e.target.value; draw(); });
 });
-['clay', 'shadow', 'glare', 'transparent', 'trim'].forEach(id => {
+// Separate from the state-backed toggles below on purpose: these write to
+// `guides`, which is deliberately not serialised into the mockup.
+[['grid', 'on'], ['gridCols', 'cols'], ['gridRows', 'rows']].forEach(([id, key]) => {
+  document.getElementById(id).addEventListener('change', e => {
+    guides[key] = e.target.checked;
+    document.getElementById('gridbox').style.display = guides.on ? 'block' : 'none';
+    draw();
+  });
+});
+
+['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
   document.getElementById(id).addEventListener('change', e => {
     state[id] = e.target.checked;
     if (id === 'trim') document.getElementById('trimnote').style.display = e.target.checked ? 'block' : 'none';
     if (id === 'shadow') document.getElementById('shadowbox').style.display = e.target.checked ? 'block' : 'none';
+    if (id === 'highlight') document.getElementById('highlightbox').style.display = e.target.checked ? 'block' : 'none';
+    if (id === 'transparent') applyBgMode();
     draw();
   });
 });
@@ -2558,6 +2876,9 @@ onmessage = async (event) => {
     banner.classList.remove('on');
     setStatus(escapeHtml(msg.reason), false);
     goBtn.disabled = true;
+    // Without this a click that failed leaves the button greyed out still
+    // reading "Rendering" once the selection is cleared.
+    goBtn.textContent = goBtn.dataset.prev || 'Insert mockup';
     draw();
     return;
   }
@@ -2572,6 +2893,15 @@ onmessage = async (event) => {
       if (state.scale === undefined) state.scale = 2;
       if (state.fit === undefined) state.fit = 'fill';
       if (state.imgZoom === undefined) { state.imgX = 0; state.imgY = 0; state.imgZoom = 100; }
+      // Mockups saved before the sweep existed carry neither key, and Object.assign
+      // will not invent them. Must precede syncSliders, which reads state.reflect.
+      if (state.bgMode === undefined) state.bgMode = 'flat';
+      if (state.reflect === undefined) state.reflect = 55;
+      // Both need a guard: the boolean because !!state[id] below would read a
+      // missing key as false and switch the highlight off on old mockups, the
+      // number because syncSliders assigns it to an input value unguarded.
+      if (state.highlight === undefined) state.highlight = true;
+      if (state.highlightStrength === undefined) state.highlightStrength = 100;
       syncSliders();
       refreshPresetChips();
       refreshDeviceChips();
@@ -2579,13 +2909,19 @@ onmessage = async (event) => {
       buildSeg('scale', SCALES, v => { state.scale = v; }, state.scale);
       buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
       buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
+      buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
       refreshAssetChips();
       applyMode();
       ['body', 'bg'].forEach(id => document.getElementById(id).value = state[id]);
-      ['clay', 'shadow', 'glare', 'transparent', 'trim'].forEach(id => {
+      ['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
         document.getElementById(id).checked = !!state[id];
       });
       document.getElementById('trimnote').style.display = state.trim ? 'block' : 'none';
+      // shadowbox was toggled on change but never re-synced here, so restoring a
+      // mockup saved with the shadow off still showed its sliders.
+      document.getElementById('shadowbox').style.display = state.shadow ? 'block' : 'none';
+      document.getElementById('highlightbox').style.display = state.highlight ? 'block' : 'none';
+      applyBgMode();
     }
 
     if (msg.mode === 'refresh') {
@@ -2611,13 +2947,41 @@ onmessage = async (event) => {
     goBtn.disabled = false;
     goBtn.textContent = 'Insert mockup';
   }
+
+  // Any failure on the main thread lands here. Without it the button set to
+  // "Rendering" on click has no way back and stays dead for the session.
+  if (msg.type === 'insert-failed') {
+    goBtn.disabled = false;
+    goBtn.textContent = goBtn.dataset.prev || 'Insert mockup';
+    setStatus(escapeHtml(msg.reason || 'Could not insert the mockup'), false);
+  }
 };
 
+// Figma's createImage refuses anything over 4096 on the LONGEST side.
+const MAX_EXPORT_PX = 4096;
+
+// The previous clamp bounded H, which is the short axis for every landscape
+// aspect, so it never fired for any value in SCALES and 4x/16:9 went out at
+// 6400px wide and threw. Bound the axis that is actually constrained instead.
+function exportSize(scale, aspect) {
+  const maxH = Math.floor(MAX_EXPORT_PX / Math.max(1, aspect));
+  const H = Math.min(PREVIEW_H * scale, maxH, MAX_EXPORT_PX);
+  return { W: Math.round(H * aspect), H, scale: H / PREVIEW_H };
+}
+
 goBtn.addEventListener('click', () => {
-  const scale = state.scale;
   const out = document.createElement('canvas');
-  const H = Math.min(PREVIEW_H * scale, 4096);
-  const W = Math.round(H * state.aspect);
+  // scale is the multiplier actually used, which is not state.scale when the
+  // request had to be cut down. code.js divides the pixel size by it to size the
+  // placed rectangle, so sending the requested value would misplace it.
+  const { W, H, scale } = exportSize(state.scale, state.aspect);
+  if (scale < state.scale) {
+    const label = (SCALES.find(s => s[1] === state.scale) || [state.scale + 'x'])[0];
+    setStatus(escapeHtml(
+      label + ' at this frame ratio exceeds Figma’s ' + MAX_EXPORT_PX +
+      'px limit — exported at ' + W + '×' + H +
+      ' (' + (Math.round(scale * 10) / 10) + 'x)'), false);
+  }
   renderFramed(out, W, H);
   // Trimming changes the output size, so report the canvas rather than the
   // requested frame — otherwise the placed rectangle gets the wrong aspect.
@@ -2633,6 +2997,9 @@ goBtn.addEventListener('click', () => {
       }
     }, '*');
   }, 'image/png');
+  // Stashed so a failure can put back whichever label was showing — "Refresh
+  // mockup" when reopened from an existing one, "Insert mockup" otherwise.
+  goBtn.dataset.prev = goBtn.textContent;
   goBtn.disabled = true;
   goBtn.textContent = 'Rendering';
 });

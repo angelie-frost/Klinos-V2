@@ -20,7 +20,8 @@
       "Bash(ls tools/)",
       "Bash(echo \"-- final parse --\")",
       "Bash(python rim_sheet.py)",
-      "Bash(node --check /tmp/c.js)"
+      "Bash(node --check /tmp/c.js)",
+      "Bash(cd \"c:/Users/Angelie/Desktop/AI Initiative/Klinos\")"
     ]
   }
 }

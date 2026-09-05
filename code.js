@@ -109,15 +109,23 @@ async function syncSelection() {
   figma.ui.postMessage({ type: 'empty', reason: 'That selection cannot be exported. Pick a frame or group.' });
 }
 
+// The UI disables its button and shows "Rendering" the moment it posts an
+// insert, and only hears back on success. Every failure has to say so, or the
+// button stays dead for the rest of the session.
+function failInsert(reason) {
+  figma.notify(reason);
+  figma.ui.postMessage({ type: 'insert-failed', reason });
+}
+
 async function insertMockup(msg) {
   if (!currentSourceId) {
-    figma.notify('Select a frame first.');
+    failInsert('Select a frame first.');
     return;
   }
 
   const sourceNode = await figma.getNodeByIdAsync(currentSourceId);
   if (!sourceNode) {
-    figma.notify('The source frame has gone missing.');
+    failInsert('The source frame has gone missing.');
     return;
   }
 
@@ -179,7 +187,13 @@ figma.ui.onmessage = async (msg) => {
     await restoreLayout();
     await syncSelection();
   } else if (msg.type === 'insert') {
-    await insertMockup(msg);
+    // Catch-all rather than a guard around createImage specifically: whatever
+    // goes wrong in here, the UI has to be told so it can release the button.
+    try {
+      await insertMockup(msg);
+    } catch (e) {
+      failInsert('Could not insert the mockup: ' + ((e && e.message) || String(e)));
+    }
   }
 };
 
