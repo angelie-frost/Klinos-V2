@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/Users/Angelie/Desktop/AI Initiative/Perspective Mockup\")",
+      "Bash(python -c ' *)",
+      "Bash(node --check __TRACKED_VAR__/c.js)",
+      "Bash(echo \"PARSE OK\")",
+      "Bash(grep -n 'setImgUniforms\\(u,' ui.html)",
+      "Bash(python -)",
+      "Bash(echo)",
+      "Bash(echo \"BUILTIN line:\")",
+      "Bash(awk '{ if \\(length\\($0\\) > 100000\\) print \"  line \"NR\"  length \"length\\($0\\) }' ui.html)",
+      "Bash(ls -la ui.html code.js manifest.json tools/phone_sdf.py)",
+      "Bash(echo \"-- does anything else import phone_sdf? --\")",
+      "Bash(grep -rn \"phone_sdf\" tools/ *.py)",
+      "Bash(echo \"  nothing\")",
+      "Bash(echo \"-- finish plumbing intact --\")",
+      "Bash(grep -n \"FINISHES\\\\[state.finish\\\\]\\\\|Object.keys\\(FINISHES\\)\" ui.html)",
+      "Bash(rm -rf tools/__pycache__)",
+      "Bash(ls tools/)",
+      "Bash(echo \"-- final parse --\")",
+      "Bash(python rim_sheet.py)",
+      "Bash(node --check /tmp/c.js)"
+    ]
+  }
+}

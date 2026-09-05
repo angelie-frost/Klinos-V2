@@ -1,0 +1,10 @@
+{
+  "//": "ui.html carries ~600 KB of base64 device assets on one line. These keep the editor and search usable.",
+  "search.exclude": { "**/node_modules": true },
+  "files.exclude": { "**/node_modules": true },
+  "editor.wordWrap": "off",
+  "editor.minimap.enabled": false,
+  "editor.largeFileOptimizations": true,
+  "html.format.enable": false,
+  "files.associations": { "manifest.json": "jsonc" }
+}
