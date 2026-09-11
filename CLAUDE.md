@@ -64,5 +64,6 @@ repo, or touching `package.py`'s versioning.
 ## Packaging
 
 `python3 tools/package.py` builds the zip, auto-bumping the version number and
-stamping it into `package.json` and `manifest.json`. The next number comes from
+stamping it into `package.json`. The manifest name is deliberately left
+unversioned — Figma shows it as the panel title. The next number comes from
 scanning the output folder, so deleting old zips rewinds the count.
