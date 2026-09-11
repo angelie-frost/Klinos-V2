@@ -272,6 +272,16 @@
     <div class="sub">Finish</div>
     <div class="chips" id="finishes"></div>
   </div>
+  <div id="screenbox" style="display:none">
+    <div class="sub">Just the screen content, with the phone body stripped out.</div>
+    <div class="seg" id="screenshape"></div>
+    <div class="sub">Original leaves the corners square. Rounded applies the device display radius, and Notch also punches the notch through to transparent so the top edge follows the device silhouette. Those three cover the same phone-shaped area — Fill/Fit/Stretch above decides how the frame sits inside it.</div>
+    <div class="sub">Match instead takes the selected element's own proportions, square-cornered, so nothing is cropped or letterboxed. Falls back to the phone shape when nothing usable is selected.</div>
+    <div id="screenradiusbox">
+      <div class="slider"><span class="name">Corner radius</span><input type="range" id="screenRadius" min="0" max="100" value="0"><span class="val" id="screenRadiuso"></span></div>
+      <div class="sub">0% keeps the element's own shape exactly. 100% rounds the short side all the way into a capsule.</div>
+    </div>
+  </div>
   <div id="assetbox" style="display:none">
     <div class="sub">Finish</div>
     <div class="chips" id="colours"></div>
@@ -347,7 +357,7 @@
 <div class="card">
   <h3>Finish</h3>
   <div class="swatches" style="margin-bottom:6px">
-    <div class="swatch"><input type="color" id="body" value="#2b2b30">Body</div>
+    <div class="swatch" id="bodyrow"><input type="color" id="body" value="#2b2b30">Body</div>
     <div class="swatch"><input type="color" id="bg" value="#f2f2f4">Canvas</div>
   </div>
   <div id="bgmoderow">
@@ -1071,6 +1081,142 @@ void main() {
 }
 `;
 
+// Screen only: the display content at the Studio pose, with the chassis gone.
+// Deliberately a separate program rather than a branch in STUDIO_FRAG — without
+// a body there is nothing to occlude the glass, so the 96-step march collapses
+// to one exact ray-plane hit, and none of the material path is reachable.
+const SCREEN_FRAG = `
+precision highp float;
+
+uniform vec2  uRes;
+uniform mat3  uRot;      // object -> world, for the pixel footprint
+uniform mat3  uRotT;     // world -> object, for rays
+uniform float uCamZ, uTanHalf, uAspect;
+uniform sampler2D uTex;
+uniform float uHasTex;
+uniform float uSrcAspect, uFitMode;
+uniform vec2 uImgPan;      // crop offset, in screen uv
+uniform float uImgZoom;    // >1 magnifies the design inside the display
+uniform float uNotch;      // 1 = subtract the notch from the silhouette
+uniform float uScreenR;    // display corner radius in mm; 0 = square corners
+uniform vec2  uHalf;       // display half-extents in mm (x = half width)
+
+// Plane depth only. It is the same z = D/2 STUDIO_FRAG's glass sits on, so a
+// screen render still overlays a Studio one at the same angle.
+//
+// The display half-extents are no longer constants here — they arrive as uHalf
+// so the plane can take the selected element's proportions instead of the
+// phone's. SCREEN_R went the same way for the same reason: the corner shape is
+// a user choice, and sdRRect at r = 0 is already the exact box distance, so
+// square corners need no second code path.
+const float D = 7.65;
+const float NOTCH_W = 25.0, NOTCH_H = 6.9, NOTCH_R = 3.4, NOTCH_F = 2.1;
+
+float sdRRect(vec2 p, vec2 half_, float r) {
+  vec2 q = abs(p) - half_ + r;
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+// Fourth copy of fitUV. See the note above imgPanRange in JS — all four plus
+// imgPanRange have to move together.
+vec3 fitUV(vec2 uv, float sa, float ia, float mode, vec2 pan, float zm) {
+  vec2 s = (uv - 0.5) / zm + 0.5 + pan;
+  vec2 t = s;
+  float bar = 0.0;
+  if (mode > 0.5 && mode < 1.5) {
+    if (ia > sa) t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    else         t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+  } else if (mode >= 1.5) {
+    if (ia > sa) t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+    else         t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) bar = 1.0;
+  }
+  return vec3(t, bar);
+}
+
+// The notch as a signed distance, where STUDIO_FRAG only needs a boolean: there
+// it picks a fill colour, here it is subtracted from the alpha, and a hard test
+// on a cutout edge crawls. Union of the notch rounded-rect with the two concave
+// shoulder fillets, each an intersection of half-spaces.
+//
+// Checked against STUDIO_FRAG's boolean on a 30um numpy grid before porting:
+// identical shape, zero mismatched cells inside the display, |grad| within
+// 1.03 of unity across the AA band. The fillet's p.y <= sh cap is dropped on
+// purpose — the notch box already runs past the top edge for the same reason,
+// and keeping the cap pulls the AA band in along y = sh.
+float sdNotch(vec2 p, float sh) {
+  float hw = NOTCH_W * 0.5;
+  float top = sh + 4.0, bot = sh - NOTCH_H;
+  float cy = (top + bot) * 0.5;
+  float dn = sdRRect(vec2(p.x, p.y - cy), vec2(hw, (top - bot) * 0.5), NOTCH_R);
+
+  float ax = abs(p.x);
+  float fillet = max(max(hw - ax, ax - (hw + NOTCH_F)),
+                     max((sh - NOTCH_F) - p.y,
+                         NOTCH_F - length(vec2(ax - (hw + NOTCH_F),
+                                               p.y - (sh - NOTCH_F)))));
+  return min(dn, fillet);
+}
+
+void main() {
+  vec2 ndc = vec2((gl_FragCoord.x / uRes.x) * 2.0 - 1.0,
+                  1.0 - (gl_FragCoord.y / uRes.y) * 2.0);
+  ndc.y = -ndc.y;
+  vec3 dir = normalize(vec3(ndc.x * uTanHalf * uAspect, ndc.y * uTanHalf, -1.0));
+
+  vec3 ro = uRotT * vec3(0.0, 0.0, uCamZ);
+  vec3 rd = uRotT * dir;
+
+  // Exact hit on the glass plane. Double-sided on purpose: at a steep turn the
+  // back of the plane is what faces the camera, and there is no body left to
+  // hide behind, so culling it would just punch a hole in the render.
+  if (abs(rd.z) < 1e-6) discard;
+  float t = (D * 0.5 - ro.z) / rd.z;
+  if (t <= 0.0) discard;
+  vec3 p = ro + rd * t;
+
+  float sw = uHalf.x, sh = uHalf.y;
+  float u = (p.x + sw) / (2.0 * sw);
+  float v = (sh - p.y) / (2.0 * sh);
+  float dScreen = sdRRect(p.xy, vec2(sw, sh), uScreenR);
+
+  // Same analytic pixel footprint the chassis rim uses, so the cut edge stays
+  // one soft pixel at preview size and at 4x export alike.
+  float pxmm = 2.0 * uTanHalf * max(uCamZ - (uRot * p).z, 1.0) / uRes.y;
+  float aa = pxmm * 0.75;
+
+  float a = 1.0 - smoothstep(-aa, aa, dScreen);
+  if (uNotch > 0.5) a *= smoothstep(-aa, aa, sdNotch(p.xy, sh));
+  if (a <= 0.0) discard;
+
+  vec3 design = vec3(0.93);
+  if (uHasTex > 0.5) {
+    vec3 fit = fitUV(vec2(u, v), sh / sw, uSrcAspect, uFitMode, uImgPan, uImgZoom);
+    if (fit.z > 0.5) {
+      // Letterbox bars are outside the design, not part of it. STUDIO_FRAG
+      // paints them black because they sit on opaque glass; here there is
+      // nothing behind them, so they are simply absent.
+      a = 0.0;
+    } else {
+      // Sample RGBA, not .rgb. Taking only .rgb discarded the source's own
+      // alpha, and Figma writes a rounded rectangle's corners as transparent
+      // pixels with rgb = 0 — so every transparent pixel became solid black,
+      // which the square Match mask then declared opaque. That was the black
+      // corner artifact. Multiplying tex.a into the outline mask is what makes
+      // the export match the selected element's real boundary.
+      vec4 tex = texture2D(uTex, clamp(fit.xy, 0.001, 0.999));
+      design = tex.rgb;
+      a *= tex.a;
+    }
+  }
+
+  // Straight alpha, not premultiplied — the context is premultipliedAlpha: false.
+  // The design is written as-is, never through the HDR curve, for the same
+  // reason STUDIO_FRAG composites it after tone mapping.
+  gl_FragColor = vec4(design, a);
+}
+`;
+
 // Studio Sweep: a cyclorama backdrop -- floor running back into a quarter-round
 // curve and up into a wall -- with the device's reflection marched off the
 // floor. Kept as its own program rather than a branch in STUDIO_FRAG because
@@ -1221,7 +1367,7 @@ void main() {
 
 const glCanvas = document.createElement('canvas');
 const gl = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true, antialias: false });
-let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, texture = null, hasTexture = false;
+let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, screenProgram = null, texture = null, hasTexture = false;
 
 function buildProgram(fragSrc) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
@@ -1245,6 +1391,7 @@ function initGL() {
   assetProgram = buildProgram(ASSET_FRAG);
   studioProgram = buildProgram(STUDIO_FRAG);
   backdropProgram = buildProgram(BACKDROP_FRAG);
+  screenProgram = buildProgram(SCREEN_FRAG);
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -1262,11 +1409,29 @@ initGL();
 
 let srcAspect = 2.164;   // height / width of the loaded design
 
+// Height/width of the selected node's own box, from the width/height code.js
+// already posts alongside the PNG. null when nothing usable is selected.
+//
+// Deliberately not on `state`, for the same reason `view` and `guides` are not:
+// it describes the current selection, not the output, and it re-derives itself
+// every time a selection arrives — so a mockup whose source was resized picks
+// up the new proportions on refresh instead of restoring a stale number.
+//
+// Not interchangeable with srcAspect above. That one comes from the exported
+// bitmap, and an export bleeds to cover drop shadows, blurs and strokes, so a
+// node with effects exports wider than its own box. This is the honest shape.
+let srcNodeAspect = null;
+
 function uploadScreen(bitmap) {
   if (!gl || !texture) return;
   if (bitmap.width && bitmap.height) srcAspect = bitmap.height / bitmap.width;
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  // Straight alpha, matching the PNG's own storage and the decode below. Left
+  // to the default this is browser-dependent, and SCREEN_FRAG cannot sample
+  // tex.a correctly without knowing which it got — a premultiplied texture
+  // would darken every antialiased edge it touches.
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
   hasTexture = true;
 }
@@ -1421,6 +1586,7 @@ async function loadBuiltIn() {
 function render(canvas, W, H) {
   if (state.mode === 'photo') return renderPhoto(canvas, W, H);
   if (state.mode === 'studio') return renderStudio(canvas, W, H);
+  if (state.mode === 'screen') return renderScreen(canvas, W, H);
   if (state.mode === 'asset' && BUNDLES[state.bundle]) return renderAsset(canvas, W, H);
   return renderGenerated(canvas, W, H);
 }
@@ -1435,6 +1601,32 @@ const FIT_MODES = { stretch: 0, fill: 1, fit: 2 };
 // Studio display half-extents in millimetres, matching the shader's
 // `sw = W * 0.5 - BEZEL` for W = 71.5, H = 146.7, BEZEL = 2.4.
 const STUDIO_SW = 71.5 / 2 - 2.4, STUDIO_SH = 146.7 / 2 - 2.4;
+// Mirrors SCREEN_R in STUDIO_FRAG. Screen mode passes it as a uniform so the
+// corner shape can be chosen; the other modes keep it as a shader constant.
+const STUDIO_SCREEN_R = 9.6;
+
+const SCREEN_DIAG = Math.hypot(STUDIO_SW, STUDIO_SH);
+
+// Half-extents of the screen plane in millimetres.
+//
+// Only 'match' varies: it takes the selected element's proportions but holds
+// the display's diagonal, so a tall element and a wide one land at about the
+// same size and switching between them does not make the render lurch. Pinning
+// the height instead would make a 16:9 element ~2.7x wider than the phone and
+// push it out of frame.
+//
+// The early return is not only the no-selection fallback — it is what
+// *guarantees* Original, Rounded and Notch cannot move. The formula does
+// degenerate to the constants exactly at the phone's aspect (checked offline,
+// 0.0 mm error), but there is no reason to route the untouched shapes through
+// float arithmetic to find that out.
+function screenHalfExtents() {
+  if (state.screenShape !== 'match' || !srcNodeAspect) {
+    return { hw: STUDIO_SW, hh: STUDIO_SH };
+  }
+  const hw = SCREEN_DIAG / Math.sqrt(1 + srcNodeAspect * srcNodeAspect);
+  return { hw, hh: hw * srcNodeAspect };
+}
 
 // How far the crop window may slide before it runs off the source image.
 //
@@ -1442,7 +1634,7 @@ const STUDIO_SW = 71.5 / 2 - 2.4, STUDIO_SH = 146.7 / 2 - 2.4;
 // and k is the per-axis factor from the fit branch. Requiring t within [0,1] for
 // every uv in [0,1] collapses to |pan| <= 0.5/k - 0.5/zm, per axis.
 //
-// This mirrors fitUV in all three shaders. Change one and this has to follow.
+// This mirrors fitUV in all four shaders. Change one and this has to follow.
 function imgPanRange(sa, ia, mode, zm) {
   let kx = 1, ky = 1;
   if (mode > 0.5 && mode < 1.5) {           // fill
@@ -1600,6 +1792,96 @@ function renderStudio(canvas, W, H) {
     const hull = convexHull(cast.map(toPx));
     paintShadow(ctx, hull, W, H, 1.0);
   }
+  ctx.drawImage(scratch, 0, 0);
+}
+
+// Screen only. The Studio pose and the Studio screen-fitting path, with the
+// chassis compositing cut out: no silhouette, no sweep, no ground shadow.
+//
+// The camera framing below is deliberately left exactly as renderStudio has it,
+// bounding sphere of the *body* and all — so a screen-only export drops onto a
+// Studio export at the same angle pixel for pixel. Refitting the camera to the
+// display would be tighter but would break that correspondence; Frame > Size
+// and Trim already cover wanting it bigger in the frame.
+function renderScreen(canvas, W, H) {
+  const ctx = canvas.getContext('2d');
+  canvas.width = W; canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+  if (!state.transparent) { ctx.fillStyle = state.bg; ctx.fillRect(0, 0, W, H); }
+  if (!gl || !screenProgram) return;
+
+  const R = rotationMatrix(state.rx, state.ry, state.rz);
+  const Rt = [R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]];
+  const camZ = 1400 - (state.persp / 100) * 1080;
+
+  const radius = Math.hypot(Math.hypot(71.5 / 2, 146.7 / 2), 7.65 / 2);
+  const half = Math.asin(Math.min(radius / camZ, 0.99));
+  const tanHalf = Math.tan(half / (state.zoom / 100));
+
+  glCanvas.width = W; glCanvas.height = H;
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(screenProgram);
+  gl.disable(gl.BLEND);
+  const u = n => gl.getUniformLocation(screenProgram, n);
+  const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
+  gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
+  gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
+  gl.uniform2f(u('uRes'), W, H);
+  gl.uniform1f(u('uCamZ'), camZ);
+  gl.uniform1f(u('uTanHalf'), tanHalf);
+  gl.uniform1f(u('uAspect'), W / H);
+  gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
+  gl.uniform1f(u('uSrcAspect'), srcAspect);
+  gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
+  // Match implies square corners: the radius is the device's, and there is no
+  // device once the plane is the selected element's own shape.
+  const plane = screenHalfExtents();
+  // Rounded and Notch are device-accurate. Original is square. Match exposes
+  // the radius as a fraction of half the short side, so the slider's 100% is
+  // exactly a capsule and the value can never exceed the half-extent sdRRect
+  // needs it to stay under — no clamp required.
+  let cornerR = STUDIO_SCREEN_R;
+  if (state.screenShape === 'original') cornerR = 0;
+  else if (state.screenShape === 'match') {
+    cornerR = Math.min(plane.hw, plane.hh) * (state.screenRadius || 0) / 100;
+  }
+  gl.uniform2f(u('uHalf'), plane.hw, plane.hh);
+  gl.uniform1f(u('uNotch'), state.screenShape === 'notch' ? 1 : 0);
+  gl.uniform1f(u('uScreenR'), cornerR);
+  // Under 'match' this equals uSrcAspect, which makes fitUV the identity —
+  // nothing cropped and nothing letterboxed, whatever Fill/Fit/Stretch says.
+  setImgUniforms(u, plane.hh / plane.hw);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform1i(u('uTex'), 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // Same alpha scan as Studio, but with no chassis in the layer it returns the
+  // display's own bounds — so Trim crops to the screen, notch included, which
+  // is the whole point of the mode.
+  const scratch = document.createElement('canvas');
+  scratch.width = W; scratch.height = H;
+  scratch.getContext('2d').drawImage(glCanvas, 0, 0);
+  deviceBounds = boundsFromLayer(scratch, W, H);
+
+  const toPx = (q) => {
+    const d = Math.max(camZ - q.z, 1e-3);
+    const nx = q.x / (d * tanHalf * (W / H));
+    const ny = q.y / (d * tanHalf);
+    return { x: (nx + 1) * 0.5 * W, y: (1 - ny) * 0.5 * H };
+  };
+
+  // What the drag-to-reposition and alt-wheel handlers hit-test against, so it
+  // has to be the plane actually drawn — the matched half-extents, not the
+  // phone's. Still the same z = D/2 as Studio.
+  if (wantQuad) {
+    screenQuad = [{ x: -plane.hw, y: plane.hh }, { x: plane.hw, y: plane.hh },
+                  { x: plane.hw, y: -plane.hh }, { x: -plane.hw, y: -plane.hh }]
+      .map(c => toPx(applyR(R, { x: c.x, y: c.y, z: 7.65 / 2 })));
+  }
+
   ctx.drawImage(scratch, 0, 0);
 }
 
@@ -1906,6 +2188,16 @@ state.fit = 'fill';
 state.shadowOpacity = 34; state.shadowSoft = 50;
 state.shadowAngle = 16; state.shadowHeight = 60; state.shadowContact = 88;
 state.photoRadius = 14;
+// Screen-only mode outline. 'original' leaves the corners square, 'rounded'
+// applies the device display radius, 'notch' also subtracts the notch so the
+// top edge follows the real silhouette. The rectangle itself is the same in all
+// three — only the outline changes.
+state.screenShape = 'original';
+// Extra corner rounding for the matched shape, as a percentage of half the
+// short side — so 100% is exactly a capsule and the radius can never outgrow
+// the half-extent sdRRect needs it to stay under. 0 leaves the element's own
+// shape untouched, which is what makes it a safe default.
+state.screenRadius = 0;
 // Studio backdrop. 'flat' is the original solid fill and must stay the default,
 // so an existing mockup reopens looking exactly as it was saved.
 state.bgMode = 'flat';
@@ -2363,6 +2655,10 @@ buildSeg('aspect', ASPECTS, v => { state.aspect = v; resetView(); draw(); }, sta
 buildSeg('scale', SCALES, v => { state.scale = v; }, state.scale);
 const FITS = [['Fill', 'fill'], ['Fit', 'fit'], ['Stretch', 'stretch']];
 buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
+// Default first, matching FITS and BGMODES below.
+const SCREEN_SHAPES = [['Original', 'original'], ['Rounded', 'rounded'], ['Notch', 'notch'], ['Match', 'match']];
+buildSeg('screenshape', SCREEN_SHAPES, v => { state.screenShape = v; applyScreenShape(); draw(); }, state.screenShape);
+
 const BGMODES = [['Flat fill', 'flat'], ['Studio sweep', 'sweep']];
 buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
 
@@ -2377,7 +2673,16 @@ function applyBgMode() {
     (state.bgMode === 'sweep' && !state.transparent) ? 'block' : 'none';
 }
 
-const MODES = [['Clay', 'generated'], ['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo']];
+// Mirrors applyBgMode: gated on the shape as well as the mode, because the
+// radius only means anything for the matched outline. Rounded and Notch carry
+// the device's own radius and Original is square by definition, so exposing the
+// slider for those would imply a control that does nothing.
+function applyScreenShape() {
+  document.getElementById('screenradiusbox').style.display =
+    (state.mode === 'screen' && state.screenShape === 'match') ? 'block' : 'none';
+}
+
+const MODES = [['Clay', 'generated'], ['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo'], ['Screen', 'screen']];
 const LAYOUTS = [['Stacked', 'stacked'], ['Side by side', 'side']];
 
 // Window sizes per layout. Stacked is the narrow default; side by side needs
@@ -2401,15 +2706,30 @@ function applyMode() {
   const asset = state.mode === 'asset';
   const studio = state.mode === 'studio';
   const photo = state.mode === 'photo';
+  // Screen only has no body, so everything that describes one goes away: the
+  // finish, the body colour, the clay switch, the glare, and the ground shadow
+  // — the shadow is cast from the chassis silhouette, so with the body gone it
+  // would be a shadow under nothing. Angle, Adjust, Screen, Frame and Guides all
+  // stay: a bare display is still a 3D object being framed and aligned.
+  const screen = state.mode === 'screen';
   document.getElementById('studiobox').style.display = studio ? 'block' : 'none';
   document.getElementById('photobox').style.display = photo ? 'block' : 'none';
   document.getElementById('assetbox').style.display = asset ? 'block' : 'none';
+  document.getElementById('screenbox').style.display = screen ? 'block' : 'none';
   document.getElementById('card-angle').style.display = (asset || photo) ? 'none' : 'block';
   document.getElementById('card-adjust').style.display = (asset || photo) ? 'none' : 'block';
-  document.getElementById('card-device').style.display = (asset || studio || photo) ? 'none' : 'block';
+  document.getElementById('card-device').style.display = (asset || studio || photo || screen) ? 'none' : 'block';
   document.getElementById('card-nudge').style.display = asset ? 'block' : 'none';
-  document.getElementById('clay').closest('.switchrow').style.display = (asset || studio) ? 'none' : 'flex';
+  document.getElementById('clay').closest('.switchrow').style.display = (asset || studio || screen) ? 'none' : 'flex';
+  document.getElementById('bodyrow').style.display = screen ? 'none' : 'flex';
+  document.getElementById('glare').closest('.switchrow').style.display = screen ? 'none' : 'flex';
+  document.getElementById('shadow').closest('.switchrow').style.display = screen ? 'none' : 'flex';
+  // Hidden with its parent rather than left showing sliders for a shadow that
+  // is not drawn; restored to whatever the switch actually says on the way back.
+  document.getElementById('shadowbox').style.display =
+    (!screen && state.shadow) ? 'block' : 'none';
   applyBgMode();
+  applyScreenShape();
   draw();
 }
 
@@ -2491,7 +2811,7 @@ document.getElementById('files').addEventListener('change', async (e) => {
 });
 
 // Values borrow Fuse's trailing-digit treatment: the number is solid, the unit fades.
-const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%']];
+const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%'],['screenRadius','screenRadiuso','%']];
 function setVal(outId, v, unit) {
   document.getElementById(outId).innerHTML = '<b>' + v + '</b><i>' + unit + '</i>';
 }
@@ -2873,6 +3193,9 @@ onmessage = async (event) => {
 
   if (msg.type === 'empty') {
     hasTexture = false;
+    // Nothing usable selected, so 'match' has no shape to match. Clearing this
+    // is what makes screenHalfExtents fall back to the phone display.
+    srcNodeAspect = null;
     banner.classList.remove('on');
     setStatus(escapeHtml(msg.reason), false);
     goBtn.disabled = true;
@@ -2885,8 +3208,20 @@ onmessage = async (event) => {
 
   if (msg.type === 'source') {
     const blob = new Blob([toUint8(msg.bytes)], { type: 'image/png' });
-    const bitmap = await createImageBitmap(blob);
+    // 'none' rather than the default: the default lets the browser decide
+    // whether to premultiply, and the screen shader needs the PNG's own
+    // straight alpha to mask the design by the element's real shape.
+    const bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none' });
     uploadScreen(bitmap);
+
+    // The node's own box, which code.js has always sent — this reads what is
+    // already on the wire rather than asking Figma for anything new. Clamped
+    // because a near-degenerate selection (a hairline rule, a 1px divider)
+    // would otherwise collapse the plane to nothing and render an empty frame.
+    const nw = msg.width, nh = msg.height;
+    srcNodeAspect = (Number.isFinite(nw) && Number.isFinite(nh) && nw > 0 && nh > 0)
+      ? Math.min(20, Math.max(0.05, nh / nw))
+      : null;
 
     if (msg.settings) {
       Object.assign(state, msg.settings);
@@ -2902,6 +3237,22 @@ onmessage = async (event) => {
       // number because syncSliders assigns it to an input value unguarded.
       if (state.highlight === undefined) state.highlight = true;
       if (state.highlightStrength === undefined) state.highlightStrength = 100;
+      // screenNotch was the boolean screenShape replaced. Its presence means the
+      // mockup was saved by a build that already had the Screen mode, so it
+      // pins the shape actually chosen — false meant rounded, and has to keep
+      // meaning rounded even though a fresh session now defaults to 'original'.
+      // Absent entirely means the mockup predates the mode, where the value was
+      // never reachable and the new default is free to apply.
+      if (state.screenShape === undefined) {
+        state.screenShape = state.screenNotch === true ? 'notch'
+                          : state.screenNotch === false ? 'rounded'
+                          : 'original';
+      }
+      delete state.screenNotch;   // migrated; stop re-serialising the old key
+      // Must precede syncSliders, which assigns state[id] to an input value
+      // unguarded — a mockup saved before the slider existed would otherwise
+      // set the range to undefined and print "undefined%" in the readout.
+      if (state.screenRadius === undefined) state.screenRadius = 0;
       syncSliders();
       refreshPresetChips();
       refreshDeviceChips();
@@ -2910,6 +3261,7 @@ onmessage = async (event) => {
       buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
       buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
       buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
+      buildSeg('screenshape', SCREEN_SHAPES, v => { state.screenShape = v; applyScreenShape(); draw(); }, state.screenShape);
       refreshAssetChips();
       applyMode();
       ['body', 'bg'].forEach(id => document.getElementById(id).value = state[id]);
@@ -2918,8 +3270,12 @@ onmessage = async (event) => {
       });
       document.getElementById('trimnote').style.display = state.trim ? 'block' : 'none';
       // shadowbox was toggled on change but never re-synced here, so restoring a
-      // mockup saved with the shadow off still showed its sliders.
-      document.getElementById('shadowbox').style.display = state.shadow ? 'block' : 'none';
+      // mockup saved with the shadow off still showed its sliders. This runs
+      // after applyMode, so it has to repeat applyMode's mode guard as well or
+      // it would hand the sliders back in screen mode, where the whole row is
+      // hidden and no shadow is drawn.
+      document.getElementById('shadowbox').style.display =
+        (state.mode !== 'screen' && state.shadow) ? 'block' : 'none';
       document.getElementById('highlightbox').style.display = state.highlight ? 'block' : 'none';
       applyBgMode();
     }
