@@ -260,9 +260,12 @@
   /* Rotation dials: drag the needle round, or type a value underneath. */
   .dials { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
   .dial { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .dial svg { width: 56px; height: 56px; cursor: grab; touch-action: none; }
-  .dial svg.dragging { cursor: grabbing; }
-  .dial .name { color: var(--ink-2); font-size: 12px; }
+  /* Direct child only, so the label's icon is not sized as a dial. */
+  .dial > svg { width: 56px; height: 56px; cursor: grab; touch-action: none; }
+  .dial > svg.dragging { cursor: grabbing; }
+  .dial .name { display: flex; align-items: center; gap: 5px; color: var(--ink-2); font-size: 12px; }
+  /* Icon baseline — see ICONS in the script. */
+  .icon { width: 16px; height: 16px; flex: none; color: var(--ink); }
   .dial .num { display: flex; align-items: center; gap: 2px; font-size: 13px; color: var(--ink-3); }
   .dial input {
     width: 52px; padding: 4px 6px; text-align: right;
@@ -2761,7 +2764,24 @@ function applyAngleUI() {
 // The needle angle is the value itself, clockwise from twelve o'clock, like
 // Illustrator's rotation dials. The arc marks the range the matching slider
 // allows; dragging past either end pins to it.
-const DIALS = [['rx', 'Tilt back', -70, 70], ['ry', 'Turn', -70, 70], ['rz', 'Roll', -45, 45]];
+// --- icons -----------------------------------------------------------------
+// The first Klinos icons, and the baseline for later ones: a 16x16 viewBox with
+// 1px clear at the edges, 1.25 stroke, round caps and joins, no fills, colour
+// from currentColor, open-chevron arrowheads. The rotation icons follow
+// Illustrator's axis-and-orbit convention — the axis as a line, the motion as an
+// orbit arrow around it — and Tilt is Turn turned through 90 degrees. Each
+// entry is the SVG body only; icon() supplies the shared attributes.
+const ICONS = {
+  tilt: '<path d="M1.5 8H14.5"/><path d="M9.8 3.17A2.8 6.3 0 1 1 6.6 2.54M6.61 5.32L6.6 2.54L3.91 3.25"/>',
+  turn: '<path d="M8 1.5V14.5"/><path d="M13.46 9.4A6.3 2.8 0 1 1 12.83 6.2M10.09 6.67L12.83 6.2L11.68 3.67"/>',
+  roll: '<circle cx="8" cy="8" r="1"/><path d="M12.6 4.14A6 6 0 1 1 4.56 3.09M3.73 5.74L4.56 3.09L1.78 2.95"/>'
+};
+function icon(name) {
+  return '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" ' +
+         'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
+}
+
+const DIALS = [['rx', 'Tilt back', -70, 70, 'tilt'], ['ry', 'Turn', -70, 70, 'turn'], ['rz', 'Roll', -45, 45, 'roll']];
 const dialEls = {};
 function dialPoint(deg) {
   const a = deg * Math.PI / 180;
@@ -2772,7 +2792,7 @@ function setDialValue(key, v) {
   syncSliders();
   draw();
 }
-DIALS.forEach(([key, label, min, max]) => {
+DIALS.forEach(([key, label, min, max, glyph]) => {
   const wrap = document.createElement('div');
   wrap.className = 'dial';
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -2805,7 +2825,8 @@ DIALS.forEach(([key, label, min, max]) => {
 
   const name = document.createElement('span');
   name.className = 'name';
-  name.textContent = label;
+  name.innerHTML = icon(glyph);
+  name.appendChild(document.createTextNode(label));
   const num = document.createElement('input');
   num.type = 'number'; num.min = min; num.max = max; num.step = 1;
   num.addEventListener('input', () => {
