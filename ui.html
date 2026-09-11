@@ -310,22 +310,25 @@
 <div class="card">
   <h3>Features</h3>
   <div class="seg" id="mode"></div>
-  <div id="photobox" style="display:none">
-    <div class="sub">Inspiration photo</div>
-    <label class="chip" id="photobtn" style="width:100%;justify-content:center">
-      <span id="photolabel">Choose an image</span>
-      <input type="file" id="photofile" accept="image/*" style="display:none">
-    </label>
-    <div class="sub">Drag the four handles onto the screen corners, starting top-left.</div>
-    <div class="slider"><span class="name">Corner</span><input type="range" id="photoRadius" min="0" max="30" value="14"><span class="val" id="photoRadiuso"></span></div>
-    <div class="chips" style="margin-top:10px">
-      <button class="chip" id="photofit" style="flex:1;justify-content:center">Copy angle to Studio</button>
-    </div>
-    <div class="sub" id="photofitnote" style="display:none"></div>
-  </div>
   <div id="studiobox" style="display:none">
     <div class="sub">Finish</div>
     <div class="chips" id="finishes"></div>
+  </div>
+  <div id="photobox" style="display:none">
+    <div class="sub">Inspiration photo</div>
+    <label class="chip" id="photobtn" style="width:100%;justify-content:center">
+      <span id="photolabel">Match a photo</span>
+      <input type="file" id="photofile" accept="image/*" style="display:none">
+    </label>
+    <div class="seg" id="photoview" style="margin-top:10px"></div>
+    <div id="phototools">
+      <div class="sub">Drag the four handles onto the screen corners, starting top-left.</div>
+      <div class="slider"><span class="name">Corner</span><input type="range" id="photoRadius" min="0" max="30" value="14"><span class="val" id="photoRadiuso"></span></div>
+      <div class="chips" style="margin-top:10px">
+        <button class="chip" id="photofit" style="flex:1;justify-content:center">Apply angle to phone</button>
+      </div>
+      <div class="sub" id="photofitnote" style="display:none"></div>
+    </div>
   </div>
   <div id="screenbox" style="display:none">
     <div class="sub">Just the screen content, with the phone body stripped out.</div>
@@ -1630,8 +1633,9 @@ async function loadBuiltIn() {
 
 
 function render(canvas, W, H) {
-  if (state.mode === 'photo') return renderPhoto(canvas, W, H);
-  if (state.mode === 'studio') return renderStudio(canvas, W, H);
+  // Photo is a view inside Studio: the phone body only ever comes from
+  // renderStudio, and the photo view only ever from renderPhoto.
+  if (state.mode === 'studio') return photoShown() ? renderPhoto(canvas, W, H) : renderStudio(canvas, W, H);
   if (state.mode === 'screen') return renderScreen(canvas, W, H);
   if (state.mode === 'asset' && BUNDLES[state.bundle]) return renderAsset(canvas, W, H);
   return renderGenerated(canvas, W, H);
@@ -2442,6 +2446,15 @@ let photoBitmap = null, photoTex = null;
 let photoQuad = null;          // in photo pixel coordinates
 let photoPlacement = null;     // photo -> canvas mapping used by the preview
 
+// Photo is a view inside Studio rather than a mode of its own. Not on `state`,
+// for the same reason the viewport is not: the bitmap is never saved, so a
+// stored `true` would reopen onto an empty photo. Needs a photo to mean
+// anything, so a missing one always falls back to the phone.
+let photoView = false;
+function photoShown() {
+  return state.mode === 'studio' && photoView && !!photoBitmap;
+}
+
 // Display proportions of the Studio phone, which is what the angle is applied
 // to. Fitting against any other ratio biases the recovered tilt.
 const STUDIO_ASPECT = (146.7 - 2 * 2.4) / (71.5 - 2 * 2.4);
@@ -2585,6 +2598,70 @@ function renderFramed(canvas, W, H) {
   }
 }
 
+// --- preview placeholder ---------------------------------------------------
+// A generic app screen shown on the display while nothing is selected, so the
+// angle and finish can be judged against something other than blank glass.
+// Preview only: draw() swaps it in and puts everything back before returning,
+// and the Insert path calls renderFramed directly, so an export never sees it.
+// Drawn in code rather than inlined as an image, so it costs the bundle nothing.
+const PLACEHOLDER_ASPECT = STUDIO_SH / STUDIO_SW;
+let placeholderTexture = null;
+
+function placeholderTex() {
+  if (placeholderTexture || !gl) return placeholderTexture;
+  const W = 600, H = Math.round(W * PLACEHOLDER_ASPECT);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const box = (x, y, w, h, r, fill) => {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+  };
+  const dot = (x, y, r, fill) => {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill();
+  };
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#E9EEF6'); bg.addColorStop(1, '#FFFFFF');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // Status bar, kept clear of the notch in the middle.
+  ctx.font = '600 30px -apple-system, "SF Pro Text", Inter, system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#1F2430';
+  ctx.fillText('9:41', 72, 58);
+  for (let i = 0; i < 4; i++) box(448 + i * 14, 66 - (10 + i * 6), 9, 10 + i * 6, 2, '#1F2430');
+  box(512, 47, 40, 22, 6, '#1F2430');
+
+  // Heading, hero card, a row of avatars, three list rows, a tab bar.
+  box(48, 132, 260, 36, 18, '#1F2430');
+  box(48, 186, 180, 20, 10, '#B7C0CE');
+  const hero = ctx.createLinearGradient(48, 240, 552, 540);
+  hero.addColorStop(0, '#5E8FB5'); hero.addColorStop(1, '#8B5CF6');
+  box(48, 240, 504, 300, 36, hero);
+  box(84, 440, 220, 26, 13, 'rgba(255,255,255,0.85)');
+  box(84, 480, 150, 18, 9, 'rgba(255,255,255,0.55)');
+  ['#F6D7C3', '#CFE3F7', '#D9F0DC', '#E6DAF7'].forEach((f, i) => dot(100 + i * 133, 624, 44, f));
+  for (let i = 0; i < 3; i++) {
+    const y = 740 + i * 130;
+    box(48, y, 504, 104, 26, '#FFFFFF');
+    box(72, y + 22, 60, 60, 16, '#DCE3EE');
+    box(156, y + 30, 240, 20, 10, '#C9D1DD');
+    box(156, y + 62, 160, 16, 8, '#E1E6ED');
+  }
+  box(48, H - 150, 504, 96, 40, '#FFFFFF');
+  [132, 244, 356, 468].forEach((x, i) => dot(x, H - 102, 12, i ? '#C9D1DD' : '#5E8FB5'));
+  box(W / 2 - 90, H - 34, 180, 10, 5, 'rgba(31,36,48,0.25)');
+
+  placeholderTexture = makeTexture(c);
+  return placeholderTexture;
+}
+
 const PREVIEW_H = 900;
 function draw() {
   stage.classList.toggle('alpha', !!state.transparent);
@@ -2592,8 +2669,24 @@ function draw() {
   // a different size and would leave it in the wrong coordinate space.
   screenQuad = null;
   wantQuad = true;
-  renderFramed(preview, Math.round(PREVIEW_H * state.aspect), PREVIEW_H);
-  wantQuad = false;
+  // No design yet: show the placeholder instead of blank glass. Everything the
+  // swap touches is put back in the finally, so handlers outside draw() still
+  // see no texture, and a design's own pan and zoom survive a deselect.
+  const ph = !hasTexture && placeholderTex();
+  const saved = ph && { texture, srcAspect, x: state.imgX, y: state.imgY, z: state.imgZoom };
+  if (ph) {
+    texture = ph; hasTexture = true; srcAspect = PLACEHOLDER_ASPECT;
+    state.imgX = 0; state.imgY = 0; state.imgZoom = 100;
+  }
+  try {
+    renderFramed(preview, Math.round(PREVIEW_H * state.aspect), PREVIEW_H);
+  } finally {
+    wantQuad = false;
+    if (ph) {
+      texture = saved.texture; hasTexture = false; srcAspect = saved.srcAspect;
+      state.imgX = saved.x; state.imgY = saved.y; state.imgZoom = saved.z;
+    }
+  }
 }
 
 // Chips: white pill, black when selected.
@@ -2891,7 +2984,7 @@ buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, s
 // cannot be left showing for a mode that has no use for it.
 function applyBgMode() {
   document.getElementById('bgmoderow').style.display =
-    state.mode === 'studio' ? 'block' : 'none';
+    (state.mode === 'studio' && !photoShown()) ? 'block' : 'none';
   document.getElementById('sweepbox').style.display =
     (state.bgMode === 'sweep' && !state.transparent) ? 'block' : 'none';
 }
@@ -2907,7 +3000,18 @@ function applyScreenShape() {
 
 // Clay ('generated') is hidden from the picker, not removed: it still renders,
 // so a mockup saved in it refreshes unchanged. Re-enable by adding it back here.
-const MODES = [['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo'], ['Screen', 'screen']];
+const MODES = [['Studio', 'studio'], ['Photoreal', 'asset'], ['Screen', 'screen']];
+
+// Studio's two views once a photo is loaded. Whichever is showing is what gets
+// inserted: the phone, or the design warped into the photo.
+const PHOTO_VIEWS = [['Phone', 'phone'], ['Photo', 'photo']];
+function setPhotoView(on) {
+  photoView = on;
+  // Zoom placed for aiming at corners means nothing on the phone, and back.
+  resetView();
+  applyMode();
+  previewPose();
+}
 const LAYOUTS = [['Stacked', 'stacked'], ['Side by side', 'side']];
 
 // Window sizes per layout. Stacked is the narrow default; side by side needs
@@ -2930,28 +3034,34 @@ function applyLayout(notify) {
 function applyMode() {
   const asset = state.mode === 'asset';
   const studio = state.mode === 'studio';
-  const photo = state.mode === 'photo';
+  // The photo view, not a mode: Studio with a photo loaded and showing.
+  const photo = photoShown();
   // Screen only has no body, so everything that describes one goes away: the
   // finish, the body colour, the clay switch, the glare, and the ground shadow
   // — the shadow is cast from the chassis silhouette, so with the body gone it
   // would be a shadow under nothing. Angle, Screen and Frame all
   // stay: a bare display is still a 3D object being framed and aligned.
   const screen = state.mode === 'screen';
-  document.getElementById('studiobox').style.display = studio ? 'block' : 'none';
-  document.getElementById('photobox').style.display = photo ? 'block' : 'none';
+  document.getElementById('studiobox').style.display = (studio && !photo) ? 'block' : 'none';
+  document.getElementById('photobox').style.display = studio ? 'block' : 'none';
+  // The toggle only means anything once there is a photo to toggle to.
+  document.getElementById('photoview').style.display = photoBitmap ? '' : 'none';
+  buildSeg('photoview', PHOTO_VIEWS, v => setPhotoView(v === 'photo'), photo ? 'photo' : 'phone');
+  document.getElementById('phototools').style.display = photo ? 'block' : 'none';
   document.getElementById('assetbox').style.display = asset ? 'block' : 'none';
   document.getElementById('screenbox').style.display = screen ? 'block' : 'none';
   document.getElementById('card-angle').style.display = (asset || photo) ? 'none' : 'block';
-  document.getElementById('card-device').style.display = (asset || studio || photo || screen) ? 'none' : 'block';
+  document.getElementById('card-device').style.display = (asset || studio || screen) ? 'none' : 'block';
   document.getElementById('card-nudge').style.display = asset ? 'block' : 'none';
   document.getElementById('clay').closest('.switchrow').style.display = (asset || studio || screen) ? 'none' : 'flex';
   document.getElementById('bodyrow').style.display = screen ? 'none' : 'flex';
   document.getElementById('glare').closest('.switchrow').style.display = screen ? 'none' : 'flex';
-  document.getElementById('shadow').closest('.switchrow').style.display = screen ? 'none' : 'flex';
+  // renderPhoto casts no shadow, so the photo view drops the switch too.
+  document.getElementById('shadow').closest('.switchrow').style.display = (screen || photo) ? 'none' : 'flex';
   // Hidden with its parent rather than left showing sliders for a shadow that
   // is not drawn; restored to whatever the switch actually says on the way back.
   document.getElementById('shadowbox').style.display =
-    (!screen && state.shadow) ? 'block' : 'none';
+    (!screen && !photo && state.shadow) ? 'block' : 'none';
   applyBgMode();
   applyScreenShape();
   draw();
@@ -3088,7 +3198,10 @@ document.getElementById('photofile').addEventListener('change', async (e) => {
   resetView();
   label.textContent = f.name.length > 26 ? f.name.slice(0, 24) + '…' : f.name;
   setStatus('Drag the handles onto the screen corners, top-left first', true);
-  draw();
+  // Uploading is what opens the photo view. The design still comes from the
+  // Figma selection; the photo is only what the quad is placed on.
+  photoView = true;
+  applyMode();
   previewPose();
 });
 
@@ -3142,10 +3255,10 @@ stage.addEventListener('pointerdown', (ev) => {
   }
   if (ev.button !== 0) return;
 
-  // 2. A corner handle, in photo mode. The tolerance shrinks as the view zooms
+  // 2. A corner handle, in the photo view. The tolerance shrinks as the view zooms
   //    in, which is the whole point of the zoom: a fixed on-screen grab radius
   //    covers less of the photo the closer you are.
-  if (state.mode === 'photo' && photoQuad && photoPlacement) {
+  if (photoShown() && photoQuad && photoPlacement) {
     const { sc, ox, oy } = photoPlacement;
     let best = -1, bd = Infinity;
     photoQuad.forEach((q, i) => {
@@ -3208,7 +3321,7 @@ stage.addEventListener('pointermove', (ev) => {
 // Report the recovered angle as soon as a handle is released, so the fit can be
 // judged while placing corners rather than only after committing.
 function previewPose() {
-  if (state.mode !== 'photo' || !photoQuad) return;
+  if (!photoShown() || !photoQuad) return;
   const pose = fitPose(photoQuad, STUDIO_ASPECT);
   if (!pose || !isFinite(pose.e)) return;
   const good = pose.e < 0.06;
@@ -3297,11 +3410,13 @@ document.getElementById('photofit').addEventListener('click', () => {
   state.ry = Math.round(pose.ry);
   state.rz = Math.round(pose.rz);
   state.persp = Math.max(0, Math.min(100, Math.round((1400 - camZ) / 1080 * 100)));
-  state.mode = 'studio';
   state.preset = CUSTOM;
+  // Already in Studio, so applying only flips back to the phone. The quad is
+  // kept, and the Photo view puts the handles back where they were left.
+  photoView = false;
+  resetView();
   syncSliders();
   refreshPresetChips();
-  buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
   applyMode();
   const fit = (pose.e * 100).toFixed(1);
   setStatus('Copied tilt <b>' + state.rx + '\u00b0</b> turn <b>' + state.ry +
@@ -3471,6 +3586,9 @@ onmessage = async (event) => {
       // unguarded — a mockup saved before the slider existed would otherwise
       // set the range to undefined and print "undefined%" in the readout.
       if (state.screenRadius === undefined) state.screenRadius = 0;
+      // Photo stopped being a mode and became a view inside Studio. Old photo
+      // mockups never stored the photo itself, so they reopen on the phone.
+      if (state.mode === 'photo') state.mode = 'studio';
       syncSliders();
       refreshPresetChips();
       refreshDeviceChips();
@@ -3493,7 +3611,7 @@ onmessage = async (event) => {
       // it would hand the sliders back in screen mode, where the whole row is
       // hidden and no shadow is drawn.
       document.getElementById('shadowbox').style.display =
-        (state.mode !== 'screen' && state.shadow) ? 'block' : 'none';
+        (state.mode !== 'screen' && !photoShown() && state.shadow) ? 'block' : 'none';
       document.getElementById('highlightbox').style.display = state.highlight ? 'block' : 'none';
       applyBgMode();
     }
@@ -3533,14 +3651,18 @@ onmessage = async (event) => {
 
 // Figma's createImage refuses anything over 4096 on the LONGEST side.
 const MAX_EXPORT_PX = 4096;
+// Height of a 1x export, so 16:9 at 1x is exactly 1920x1080. Kept apart from
+// PREVIEW_H on purpose: that is the size of the preview canvas, and letting it
+// double as the export base is what pinned every 1x export at 900 tall.
+const EXPORT_BASE_H = 1080;
 
 // The previous clamp bounded H, which is the short axis for every landscape
 // aspect, so it never fired for any value in SCALES and 4x/16:9 went out at
 // 6400px wide and threw. Bound the axis that is actually constrained instead.
 function exportSize(scale, aspect) {
   const maxH = Math.floor(MAX_EXPORT_PX / Math.max(1, aspect));
-  const H = Math.min(PREVIEW_H * scale, maxH, MAX_EXPORT_PX);
-  return { W: Math.round(H * aspect), H, scale: H / PREVIEW_H };
+  const H = Math.min(EXPORT_BASE_H * scale, maxH, MAX_EXPORT_PX);
+  return { W: Math.round(H * aspect), H, scale: H / EXPORT_BASE_H };
 }
 
 goBtn.addEventListener('click', () => {

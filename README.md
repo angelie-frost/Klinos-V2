@@ -262,7 +262,8 @@ Writes `dist/klinos_v1.zip`, then `_v2`, and so on. The next number
 comes from scanning the output folder, so nothing is stored between runs and
 deleting old zips rewinds the count. Versions are counted per name, so
 `--name export` starts its own series. The version is also written into
-`package.json` and the manifest name, so a stray download can be traced back.
+`package.json`, so a stray download can be traced back. The manifest name stays
+plain "Klinos", since Figma shows it as the panel title.
 `--version N` forces a number and `--dry-run` shows what would happen.
 
 ## Known gaps

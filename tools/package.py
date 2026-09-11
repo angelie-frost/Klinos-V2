@@ -8,7 +8,8 @@
 
 The next number comes from scanning the output folder, so deleting old zips
 rewinds the count and nothing is stored between runs. Version also gets written
-into package.json and manifest.json so a downloaded zip can be traced back.
+into package.json so a downloaded zip can be traced back. The manifest name is
+not stamped: Figma shows it as the panel title.
 """
 import argparse
 import json
@@ -37,7 +38,10 @@ def next_version(outdir: Path, name: str) -> int:
 
 
 def stamp_version(version: int, dry: bool):
-    """Record the version in both manifests so a stray zip can be identified."""
+    """Record the version in package.json so a stray zip can be identified.
+
+    manifest.json is left alone on purpose: Figma shows its name as the panel
+    title, and the version is not meant to be user-facing."""
     touched = []
     pkg = ROOT / 'package.json'
     if pkg.exists():
@@ -46,15 +50,6 @@ def stamp_version(version: int, dry: bool):
         if not dry:
             pkg.write_text(json.dumps(data, indent=2) + '\n')
         touched.append(f'package.json version -> {data["version"]}')
-
-    man = ROOT / 'manifest.json'
-    if man.exists():
-        data = json.loads(man.read_text())
-        base = re.sub(r' v\d+$', '', data.get('name', 'Plugin'))
-        data['name'] = f'{base} v{version}'
-        if not dry:
-            man.write_text(json.dumps(data, indent=2) + '\n')
-        touched.append(f'manifest name -> {data["name"]}')
     return touched
 
 
