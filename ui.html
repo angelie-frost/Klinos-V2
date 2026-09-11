@@ -218,6 +218,58 @@
   .swatch input[type=color]::-webkit-color-swatch-wrapper { padding: 2px; }
   .swatch input[type=color]::-webkit-color-swatch { border: none; border-radius: 8px; }
 
+  /* Stacked: the preview column pins to the top so a change made further down
+     is visible without scrolling back up. Opaque for the same reason as the
+     side-by-side footer — the cards pass underneath it. Side by side already
+     pins the preview through its own grid. */
+  body:not(.side) .left {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 14px;
+  }
+
+  .select {
+    width: 100%; padding: 8px 12px;
+    font: inherit; font-size: 12.5px; font-weight: 500; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    cursor: pointer;
+  }
+  /* Angle picker: a disclosure showing the current angle, opening onto a
+     grouped gallery of preset thumbnails, after Office's 3-D rotation menu. */
+  .anglebtn { display: flex; align-items: center; gap: 10px; padding: 5px 12px 5px 6px; text-align: left; }
+  .anglebtn canvas { width: 28px; height: 28px; flex: none; }
+  #presetname { flex: 1; }
+  .chev {
+    width: 7px; height: 7px; flex: none; margin: 0 2px 3px 0;
+    border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2);
+    transform: rotate(45deg);
+  }
+  .anglebtn[aria-expanded="true"] .chev { transform: rotate(-135deg); margin: 3px 2px 0 0; }
+  .anglemenu { margin-top: 8px; padding: 2px 10px 10px; border: 1px solid var(--line); border-radius: 12px; }
+  .anglemenu h4 { margin: 10px 0 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
+  .anglemenu .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .atile {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 6px 2px 5px; font: inherit; font-size: 11px; color: var(--ink-2);
+    background: #fff; border: 1px solid transparent; border-radius: 10px; cursor: pointer;
+  }
+  .atile:hover { background: var(--sunk); }
+  .atile.on { border-color: var(--ink); color: var(--ink); }
+  .atile canvas { width: 48px; height: 48px; }
+  /* Rotation dials: drag the needle round, or type a value underneath. */
+  .dials { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .dial { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .dial svg { width: 56px; height: 56px; cursor: grab; touch-action: none; }
+  .dial svg.dragging { cursor: grabbing; }
+  .dial .name { color: var(--ink-2); font-size: 12px; }
+  .dial .num { display: flex; align-items: center; gap: 2px; font-size: 13px; color: var(--ink-3); }
+  .dial input {
+    width: 52px; padding: 4px 6px; text-align: right;
+    font: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  }
+
   .footer {
     position: fixed; left: 0; right: 0; bottom: 0;
     display: flex; align-items: center; gap: 10px;
@@ -253,7 +305,7 @@
 </div>
 
 <div class="card">
-  <h3>Source</h3>
+  <h3>Features</h3>
   <div class="seg" id="mode"></div>
   <div id="photobox" style="display:none">
     <div class="sub">Inspiration photo</div>
@@ -275,7 +327,7 @@
   <div id="screenbox" style="display:none">
     <div class="sub">Just the screen content, with the phone body stripped out.</div>
     <div class="seg" id="screenshape"></div>
-    <div class="sub">Original leaves the corners square. Rounded applies the device display radius, and Notch also punches the notch through to transparent so the top edge follows the device silhouette. Those three cover the same phone-shaped area — Fill/Fit/Stretch above decides how the frame sits inside it.</div>
+    <div class="sub">Original leaves the corners square. Rounded applies the device display radius, and Notch also punches the notch through to transparent so the top edge follows the device silhouette. Those three cover the same phone-shaped area — the Screen card below decides how the frame sits inside it.</div>
     <div class="sub">Match instead takes the selected element's own proportions, square-cornered, so nothing is cropped or letterboxed. Falls back to the phone shape when nothing usable is selected.</div>
     <div id="screenradiusbox">
       <div class="slider"><span class="name">Corner radius</span><input type="range" id="screenRadius" min="0" max="100" value="0"><span class="val" id="screenRadiuso"></span></div>
@@ -296,16 +348,20 @@
 
 <div class="card" id="card-angle">
   <h3>Angle</h3>
-  <div class="chips grid3" id="presets"></div>
-  <button class="chip" id="matchbtn" style="margin-top:10px;width:100%;justify-content:center">Match nearest photoreal</button>
-</div>
-
-<div class="card" id="card-adjust">
-  <h3>Adjust</h3>
-  <div class="slider"><span class="name">Tilt back</span><input type="range" id="rx" min="-70" max="70" value="0"><span class="val" id="rxo"></span></div>
-  <div class="slider"><span class="name">Turn</span><input type="range" id="ry" min="-70" max="70" value="0"><span class="val" id="ryo"></span></div>
-  <div class="slider"><span class="name">Roll</span><input type="range" id="rz" min="-45" max="45" value="0"><span class="val" id="rzo"></span></div>
-  <div class="slider"><span class="name">Perspective</span><input type="range" id="persp" min="0" max="100" value="35"><span class="val" id="perspo"></span></div>
+  <button class="select anglebtn" id="presetbtn" aria-expanded="false"><canvas id="presetthumb" width="56" height="56"></canvas><span id="presetname"></span><span class="chev"></span></button>
+  <div class="anglemenu" id="presets" hidden></div>
+  <div class="dials" id="dials"></div>
+  <div class="switchrow" id="adjustrow" style="margin-top:4px"><label for="adjust">Adjust</label>
+    <span class="switch"><input type="checkbox" id="adjust"><span class="track"></span><span class="knob"></span></span></div>
+  <div id="adjustbox" style="padding-top:12px">
+    <div id="adjustrot" style="margin-bottom:11px">
+      <div class="slider"><span class="name">Tilt back</span><input type="range" id="rx" min="-70" max="70" value="0"><span class="val" id="rxo"></span></div>
+      <div class="slider"><span class="name">Turn</span><input type="range" id="ry" min="-70" max="70" value="0"><span class="val" id="ryo"></span></div>
+      <div class="slider"><span class="name">Roll</span><input type="range" id="rz" min="-45" max="45" value="0"><span class="val" id="rzo"></span></div>
+    </div>
+    <div class="slider" id="persprow"><span class="name">Perspective</span><input type="range" id="persp" min="0" max="100" value="35"><span class="val" id="perspo"></span></div>
+  </div>
+  <button class="chip" id="matchbtn" style="margin-top:12px;width:100%;justify-content:center">Match nearest photoreal</button>
 </div>
 
 <div class="card" id="card-device">
@@ -316,7 +372,7 @@
 <div class="card">
   <h3>Screen</h3>
   <div class="seg" id="fit"></div>
-  <div class="sub">Fill crops to the display, Fit letterboxes, Stretch distorts.</div>
+  <div class="sub">Fill crops the design to the display.</div>
   <div class="slider"><span class="name">Image scale</span><input type="range" id="imgZoom" min="100" max="400" value="100"><span class="val" id="imgZoomo"></span></div>
   <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;gap:10px">
     <span style="color:var(--ink-2);font-size:12px;line-height:1.4">Drag the design on the phone to reposition it. Scroll to zoom the preview, space or middle-drag to pan.</span>
@@ -328,19 +384,6 @@
   <h3>Frame</h3>
   <div class="seg" id="aspect"></div>
   <div class="slider" style="margin-top:12px"><span class="name">Size</span><input type="range" id="zoom" min="40" max="100" value="82"><span class="val" id="zoomo"></span></div>
-</div>
-
-<div class="card">
-  <h3>Guides</h3>
-  <div class="switchrow"><label for="grid">Layout grid</label>
-    <span class="switch"><input type="checkbox" id="grid"><span class="track"></span><span class="knob"></span></span></div>
-  <div id="gridbox" style="display:none">
-    <div class="switchrow"><label for="gridCols">16 columns</label>
-      <span class="switch"><input type="checkbox" id="gridCols" checked><span class="track"></span><span class="knob"></span></span></div>
-    <div class="switchrow"><label for="gridRows">8 rows</label>
-      <span class="switch"><input type="checkbox" id="gridRows" checked><span class="track"></span><span class="knob"></span></span></div>
-  </div>
-  <div class="sub">Preview only — never drawn into the exported image. Hidden while Trim to device is on, which crops the frame away.</div>
 </div>
 
 <div class="card" id="card-nudge" style="display:none">
@@ -1412,7 +1455,7 @@ let srcAspect = 2.164;   // height / width of the loaded design
 // Height/width of the selected node's own box, from the width/height code.js
 // already posts alongside the PNG. null when nothing usable is selected.
 //
-// Deliberately not on `state`, for the same reason `view` and `guides` are not:
+// Deliberately not on `state`, for the same reason `view` is not:
 // it describes the current selection, not the output, and it re-derives itself
 // every time a selection arrives — so a mockup whose source was resized picks
 // up the new proportions on refresh instead of restoring a stale number.
@@ -2178,7 +2221,7 @@ const FINISH_TILES = { Blue: '#5E8FB5', Midnight: '#1F2126', Pink: '#D9A7A9' };
 const ASPECTS = [['4:5', 0.8], ['1:1', 1], ['4:3', 1.3333], ['16:9', 1.7778]];
 const SCALES = [['1x', 1], ['2x', 2], ['4x', 4]];
 state.scale = 2;
-state.mode = 'generated';
+state.mode = 'studio';
 state.bundle = null;
 state.arx = 0; state.ary = 0; state.arz = 0;
 state.layout = 'stacked';
@@ -2229,16 +2272,6 @@ const stage = document.querySelector('.stage');
 // and the handles stay accurate at any zoom or pan offset.
 const view = { z: 1, tx: 0, ty: 0 };
 let spaceHeld = false;
-
-// --- layout guide ----------------------------------------------------------
-// Preview-only alignment grid. Kept off `state` for exactly the reason the
-// viewport above is: `state` is serialised into the Figma node on insert and
-// restored on refresh, so a guide switch left on there would follow the mockup
-// around forever. This is a property of looking, not of the output.
-const guides = { on: false, cols: true, rows: true };
-
-// Figma's layout-guide values, as configured for this project.
-const GUIDE = { cols: 16, rows: 8, margin: 64, gutter: 12, fill: 'rgba(255,0,0,0.1)' };
 
 function applyView() {
   preview.style.transform =
@@ -2549,42 +2582,6 @@ function renderFramed(canvas, W, H) {
   }
 }
 
-// Drawn straight onto the preview canvas from draw(), never from inside a
-// render* function. The export path builds its own canvas and never calls
-// draw(), so the guide cannot reach the PNG by construction — a stronger
-// guarantee than the `canvas === preview` test drawHandles uses, which trim
-// already defeats by handing render() the trimCanvas instead.
-//
-// Positions are canvas pixels: view.z is a CSS transform on the element, so it
-// never enters the backing store. Filled bands rather than strokes, so there is
-// no line width needing to be divided back out either.
-function drawGuides(canvas) {
-  // Trim crops the frame away entirely, leaving the phone's bounding box — there
-  // is no frame left for a layout grid to divide.
-  if (!guides.on || state.trim) return;
-  const ctx = canvas.getContext('2d');
-  ctx.save();
-  ctx.fillStyle = GUIDE.fill;
-  if (guides.cols) guideBands(ctx, canvas.width, GUIDE.cols, true, canvas.height);
-  if (guides.rows) guideBands(ctx, canvas.height, GUIDE.rows, false, canvas.width);
-  ctx.restore();
-}
-
-// Figma's "Stretch" type: the run spans the frame minus a margin at each end,
-// and the bands share what is left with one gutter between each pair.
-function guideBands(ctx, extent, count, horizontal, across) {
-  const usable = extent - 2 * GUIDE.margin - (count - 1) * GUIDE.gutter;
-  // A narrow frame can be smaller than its own margins and gutters; without this
-  // the band width goes negative and the rects draw backwards.
-  if (count < 1 || usable <= 0) return;
-  const band = usable / count;
-  for (let i = 0; i < count; i++) {
-    const at = GUIDE.margin + i * (band + GUIDE.gutter);
-    if (horizontal) ctx.fillRect(at, 0, band, across);
-    else ctx.fillRect(0, at, across, band);
-  }
-}
-
 const PREVIEW_H = 900;
 function draw() {
   stage.classList.toggle('alpha', !!state.transparent);
@@ -2594,7 +2591,6 @@ function draw() {
   wantQuad = true;
   renderFramed(preview, Math.round(PREVIEW_H * state.aspect), PREVIEW_H);
   wantQuad = false;
-  drawGuides(preview);
 }
 
 // Chips: white pill, black when selected.
@@ -2629,10 +2625,214 @@ function buildSeg(id, pairs, onPick, activeValue) {
   });
 }
 
+// --- angle -----------------------------------------------------------------
+// Presets live in a dropdown gallery of thumbnails, grouped the way Office's
+// 3-D rotation menu is. 'Custom' is any angle not taken from one, and is
+// driven by the dials. Picking a preset hides the dials and offers Adjust
+// instead, which opens the sliders for fine-tuning while keeping the preset.
+const CUSTOM = 'Custom';
+// Not on `state`: whether the fine-tune sliders are open is a property of
+// looking, not of the output.
+let angleAdjust = false;
+function isPreset(k) { return Object.prototype.hasOwnProperty.call(PRESETS, k); }
+
+// Grouping for the gallery. Any preset not listed here lands under More, so
+// swapping PRESETS for team-agreed values still shows every one of them.
+const ANGLE_GROUPS = [['Upright', ['Flat', 'Turn left', 'Turn right']],
+                      ['Laid back', ['Laid left', 'Laid right', 'Steep']]];
+
+// A grey slab at the given angle, projected with Studio's camera so the icon
+// leans the same way the render does. Depth is doubled: at 48px a true 7.65mm
+// edge is under a pixel and every angle reads as a flat card.
+function drawAngleThumb(canvas, a) {
+  const S = canvas.width, ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  const R = rotationMatrix(a.rx, a.ry, a.rz);
+  const camZ = 1400 - (a.persp / 100) * 1080;
+  const proj = (o, z) => {
+    const q = applyR(R, { x: o.x, y: o.y, z });
+    const d = Math.max(camZ - q.z, 20);
+    return { x: q.x / d, y: -q.y / d };
+  };
+  const out = roundedOutline(71.5, 146.7, 12, 4);
+  const scr = roundedOutline(61.5, 136.7, 8, 4);
+  const front = out.map(o => proj(o, 7.65)), back = out.map(o => proj(o, -7.65));
+  const glass = scr.map(o => proj(o, 7.7));
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  front.concat(back).forEach(p => {
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+    y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  });
+  const k = S * 0.86 / Math.max(x1 - x0, y1 - y0);
+  const px = p => [S / 2 + (p.x - (x0 + x1) / 2) * k, S / 2 + (p.y - (y0 + y1) / 2) * k];
+  const poly = (pts, fill) => {
+    ctx.beginPath();
+    pts.forEach((p, i) => { const [x, y] = px(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+  };
+  // Same trick as renderGenerated: back face plus every side quad fills the
+  // silhouette, then the front face covers its own part.
+  poly(back, '#5A5A5F');
+  for (let i = 0; i < out.length; i++) {
+    const j = (i + 1) % out.length;
+    poly([front[i], front[j], back[j], back[i]], '#5A5A5F');
+  }
+  poly(front, '#D1D1D6');
+  poly(glass, '#AEAEB2');
+}
+
+function pickAngle(k) {
+  state.preset = k;
+  // Custom keeps the angle already showing, so it starts from the last preset.
+  if (isPreset(k)) Object.assign(state, PRESETS[k]);
+  setAngleMenu(false);
+  syncSliders();
+  refreshPresetChips();
+  draw();
+}
+
+function buildAngleMenu() {
+  const el = document.getElementById('presets');
+  el.innerHTML = '';
+  const listed = new Set();
+  const groups = [['Custom', [CUSTOM]]];
+  ANGLE_GROUPS.forEach(([name, keys]) => {
+    const ks = keys.filter(isPreset);
+    ks.forEach(k => listed.add(k));
+    if (ks.length) groups.push([name, ks]);
+  });
+  const rest = Object.keys(PRESETS).filter(k => !listed.has(k));
+  if (rest.length) groups.push(['More', rest]);
+  const active = isPreset(state.preset) ? state.preset : CUSTOM;
+  groups.forEach(([name, keys]) => {
+    const h = document.createElement('h4');
+    h.textContent = name;
+    const tiles = document.createElement('div');
+    tiles.className = 'tiles';
+    keys.forEach(k => {
+      const b = document.createElement('button');
+      b.className = 'atile' + (k === active ? ' on' : '');
+      const c = document.createElement('canvas');
+      c.width = c.height = 96;
+      // The Custom tile shows wherever the dials currently are.
+      drawAngleThumb(c, k === CUSTOM ? state : PRESETS[k]);
+      b.appendChild(c);
+      b.appendChild(document.createTextNode(k === CUSTOM ? 'Custom' : k));
+      b.onclick = () => pickAngle(k);
+      tiles.appendChild(b);
+    });
+    el.appendChild(h); el.appendChild(tiles);
+  });
+}
+
+function setAngleMenu(open) {
+  const el = document.getElementById('presets');
+  if (open) buildAngleMenu();
+  el.hidden = !open;
+  document.getElementById('presetbtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+document.getElementById('presetbtn').addEventListener('click', () => {
+  setAngleMenu(document.getElementById('presets').hidden);
+});
+
+// Name kept from the chip version so the restore path needs no change.
 function refreshPresetChips() {
-  buildChips('presets', Object.keys(PRESETS), k => {
-    state.preset = k; Object.assign(state, PRESETS[k]); syncSliders();
-  }, state.preset, false);
+  document.getElementById('presetname').textContent =
+    isPreset(state.preset) ? state.preset : 'Custom rotation';
+  drawAngleThumb(document.getElementById('presetthumb'), state);
+  if (!document.getElementById('presets').hidden) buildAngleMenu();
+  applyAngleUI();
+}
+document.getElementById('adjust').addEventListener('change', e => {
+  angleAdjust = e.target.checked;
+  applyAngleUI();
+});
+
+function applyAngleUI() {
+  const preset = isPreset(state.preset);
+  document.getElementById('dials').style.display = preset ? 'none' : 'grid';
+  document.getElementById('adjustrow').style.display = preset ? 'flex' : 'none';
+  document.getElementById('adjustbox').style.display = (!preset || angleAdjust) ? 'block' : 'none';
+  document.getElementById('adjustrot').style.display = (preset && angleAdjust) ? 'block' : 'none';
+  // Perspective has no dial, so Custom keeps its slider showing.
+  document.getElementById('persprow').style.display = (!preset || angleAdjust) ? 'flex' : 'none';
+}
+
+// The needle angle is the value itself, clockwise from twelve o'clock, like
+// Illustrator's rotation dials. The arc marks the range the matching slider
+// allows; dragging past either end pins to it.
+const DIALS = [['rx', 'Tilt back', -70, 70], ['ry', 'Turn', -70, 70], ['rz', 'Roll', -45, 45]];
+const dialEls = {};
+function dialPoint(deg) {
+  const a = deg * Math.PI / 180;
+  return [28 + 22 * Math.sin(a), 28 - 22 * Math.cos(a)];
+}
+function setDialValue(key, v) {
+  state[key] = v;
+  syncSliders();
+  draw();
+}
+DIALS.forEach(([key, label, min, max]) => {
+  const wrap = document.createElement('div');
+  wrap.className = 'dial';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 56 56');
+  const [ax, ay] = dialPoint(min), [bx, by] = dialPoint(max);
+  svg.innerHTML =
+    '<circle cx="28" cy="28" r="26" fill="#fff" stroke="#EDEDF0"/>' +
+    '<path d="M' + ax + ' ' + ay + 'A22 22 0 ' + (max - min > 180 ? 1 : 0) + ' 1 ' + bx + ' ' + by +
+    '" fill="none" stroke="#E9E9EC" stroke-width="3" stroke-linecap="round"/>' +
+    '<line x1="28" y1="28" stroke="#0A0A0B" stroke-width="2" stroke-linecap="round"/>' +
+    '<circle r="3.5" fill="#0A0A0B"/>' +
+    '<circle cx="28" cy="28" r="2" fill="#0A0A0B"/>';
+  const fromEvent = e => {
+    const r = svg.getBoundingClientRect();
+    const a = Math.atan2(e.clientX - r.left - r.width / 2,
+                         r.top + r.height / 2 - e.clientY) * 180 / Math.PI;
+    return Math.round(Math.max(min, Math.min(max, a)));
+  };
+  svg.addEventListener('pointerdown', e => {
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add('dragging');
+    setDialValue(key, fromEvent(e));
+  });
+  svg.addEventListener('pointermove', e => {
+    if (svg.hasPointerCapture(e.pointerId)) setDialValue(key, fromEvent(e));
+  });
+  const end = () => svg.classList.remove('dragging');
+  svg.addEventListener('pointerup', end);
+  svg.addEventListener('pointercancel', end);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = label;
+  const num = document.createElement('input');
+  num.type = 'number'; num.min = min; num.max = max; num.step = 1;
+  num.addEventListener('input', () => {
+    const v = parseFloat(num.value);
+    if (Number.isFinite(v)) setDialValue(key, Math.round(Math.max(min, Math.min(max, v))));
+  });
+  // Typing skips the rewrite (see syncDials); this puts the clamped value back.
+  num.addEventListener('change', syncDials);
+  const numWrap = document.createElement('span');
+  numWrap.className = 'num';
+  numWrap.appendChild(num);
+  numWrap.appendChild(document.createTextNode('\u00b0'));
+
+  wrap.appendChild(svg); wrap.appendChild(name); wrap.appendChild(numWrap);
+  document.getElementById('dials').appendChild(wrap);
+  dialEls[key] = { line: svg.querySelector('line'), knob: svg.querySelectorAll('circle')[1], num };
+});
+function syncDials() {
+  DIALS.forEach(([key]) => {
+    const d = dialEls[key], v = state[key];
+    const [x, y] = dialPoint(v);
+    d.line.setAttribute('x2', x); d.line.setAttribute('y2', y);
+    d.knob.setAttribute('cx', x); d.knob.setAttribute('cy', y);
+    // Rewriting the field mid-edit would fight the keyboard.
+    if (document.activeElement !== d.num) d.num.value = v;
+  });
+  drawAngleThumb(document.getElementById('presetthumb'), state);
 }
 function refreshDeviceChips() {
   buildChips('devices', Object.keys(DEVICES), k => { state.device = k; }, state.device, true);
@@ -2653,7 +2853,9 @@ refreshDeviceChips();
 refreshFinishChips();
 buildSeg('aspect', ASPECTS, v => { state.aspect = v; resetView(); draw(); }, state.aspect);
 buildSeg('scale', SCALES, v => { state.scale = v; }, state.scale);
-const FITS = [['Fill', 'fill'], ['Fit', 'fit'], ['Stretch', 'stretch']];
+// Fit and Stretch are hidden for now, not removed: FIT_MODES and fitUV still
+// handle both, so re-enabling is adding ['Fit', 'fit'], ['Stretch', 'stretch'] back.
+const FITS = [['Fill', 'fill']];
 buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
 // Default first, matching FITS and BGMODES below.
 const SCREEN_SHAPES = [['Original', 'original'], ['Rounded', 'rounded'], ['Notch', 'notch'], ['Match', 'match']];
@@ -2682,7 +2884,9 @@ function applyScreenShape() {
     (state.mode === 'screen' && state.screenShape === 'match') ? 'block' : 'none';
 }
 
-const MODES = [['Clay', 'generated'], ['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo'], ['Screen', 'screen']];
+// Clay ('generated') is hidden from the picker, not removed: it still renders,
+// so a mockup saved in it refreshes unchanged. Re-enable by adding it back here.
+const MODES = [['Studio', 'studio'], ['Photoreal', 'asset'], ['Photo', 'photo'], ['Screen', 'screen']];
 const LAYOUTS = [['Stacked', 'stacked'], ['Side by side', 'side']];
 
 // Window sizes per layout. Stacked is the narrow default; side by side needs
@@ -2709,7 +2913,7 @@ function applyMode() {
   // Screen only has no body, so everything that describes one goes away: the
   // finish, the body colour, the clay switch, the glare, and the ground shadow
   // — the shadow is cast from the chassis silhouette, so with the body gone it
-  // would be a shadow under nothing. Angle, Adjust, Screen, Frame and Guides all
+  // would be a shadow under nothing. Angle, Screen and Frame all
   // stay: a bare display is still a 3D object being framed and aligned.
   const screen = state.mode === 'screen';
   document.getElementById('studiobox').style.display = studio ? 'block' : 'none';
@@ -2717,7 +2921,6 @@ function applyMode() {
   document.getElementById('assetbox').style.display = asset ? 'block' : 'none';
   document.getElementById('screenbox').style.display = screen ? 'block' : 'none';
   document.getElementById('card-angle').style.display = (asset || photo) ? 'none' : 'block';
-  document.getElementById('card-adjust').style.display = (asset || photo) ? 'none' : 'block';
   document.getElementById('card-device').style.display = (asset || studio || photo || screen) ? 'none' : 'block';
   document.getElementById('card-nudge').style.display = asset ? 'block' : 'none';
   document.getElementById('clay').closest('.switchrow').style.display = (asset || studio || screen) ? 'none' : 'flex';
@@ -2820,6 +3023,7 @@ function syncSliders() {
     document.getElementById(id).value = state[id];
     setVal(out, state[id], unit);
   });
+  syncDials();
 }
 SLIDERS.forEach(([id, out, unit]) => {
   document.getElementById(id).addEventListener('input', e => {
@@ -2832,15 +3036,6 @@ syncSliders();
 
 ['body', 'bg'].forEach(id => {
   document.getElementById(id).addEventListener('input', e => { state[id] = e.target.value; draw(); });
-});
-// Separate from the state-backed toggles below on purpose: these write to
-// `guides`, which is deliberately not serialised into the mockup.
-[['grid', 'on'], ['gridCols', 'cols'], ['gridRows', 'rows']].forEach(([id, key]) => {
-  document.getElementById(id).addEventListener('change', e => {
-    guides[key] = e.target.checked;
-    document.getElementById('gridbox').style.display = guides.on ? 'block' : 'none';
-    draw();
-  });
 });
 
 ['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
@@ -3082,7 +3277,9 @@ document.getElementById('photofit').addEventListener('click', () => {
   state.rz = Math.round(pose.rz);
   state.persp = Math.max(0, Math.min(100, Math.round((1400 - camZ) / 1080 * 100)));
   state.mode = 'studio';
+  state.preset = CUSTOM;
   syncSliders();
+  refreshPresetChips();
   buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
   applyMode();
   const fit = (pose.e * 100).toFixed(1);
