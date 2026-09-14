@@ -838,6 +838,29 @@ float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
   return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - edge;
 }
 
+// The notch as a signed distance, so its outline can be blended rather than hard
+// tested. Copied from SCREEN_FRAG's sdNotch with one change: the fillet's inner
+// half-space is hw - NOTCH_F - ax, not hw - ax. Butted against the notch box at
+// ax = hw, both halves of the union read 0 along that internal seam, and a
+// smoothstep paints a grey line down the inside of the notch. Overlapping the
+// fillet into the box (which is full width there) removes the seam without
+// changing the shape: 0 mismatched cells against the old boolean on a 30um numpy
+// grid inside the display, and prototype edge error 20.4 -> 4.4 (0-255) against
+// a 16-ray reference.
+float sdNotch(vec2 p, float sh) {
+  float hw = NOTCH_W * 0.5;
+  float top = sh + 4.0, bot = sh - NOTCH_H;
+  float cy = (top + bot) * 0.5;
+  float dn = sdRRect(vec2(p.x, p.y - cy), vec2(hw, (top - bot) * 0.5), NOTCH_R);
+
+  float ax = abs(p.x);
+  float fillet = max(max((hw - NOTCH_F) - ax, ax - (hw + NOTCH_F)),
+                     max((sh - NOTCH_F) - p.y,
+                         NOTCH_F - length(vec2(ax - (hw + NOTCH_F),
+                                               p.y - (sh - NOTCH_F)))));
+  return min(dn, fillet);
+}
+
 // Side hardware. Buttons are unioned onto the rail; the port and grille are
 // subtracted from the bottom face.
 //
@@ -1012,25 +1035,40 @@ vec3 fitUV(vec2 uv, float sa, float ia, float mode, vec2 pan, float zm) {
 vec3 fres(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
 vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
 
-void main() {
-  vec2 ndc = vec2((gl_FragCoord.x / uRes.x) * 2.0 - 1.0,
-                  1.0 - (gl_FragCoord.y / uRes.y) * 2.0);
+// One ray through fc (window pixels), shaded. Returns straight colour and
+// coverage; edge comes back 1 when the pixel sits on something a single ray
+// cannot resolve, so main() knows to spend more rays there.
+vec4 shadeRay(vec2 fc, out float edge) {
+  vec2 ndc = vec2((fc.x / uRes.x) * 2.0 - 1.0,
+                  1.0 - (fc.y / uRes.y) * 2.0);
   ndc.y = -ndc.y;
   vec3 dir = normalize(vec3(ndc.x * uTanHalf * uAspect, ndc.y * uTanHalf, -1.0));
 
   vec3 ro = uRotT * vec3(0.0, 0.0, uCamZ);
   vec3 rd = uRotT * dir;
 
+  // The silhouette used to be a bare hit-or-discard. The march also keeps its
+  // closest approach in pixels, and a near miss gets partial coverage shaded at
+  // that point. Measured on the numpy prototype against 8x8 supersampled
+  // coverage: 0.5 - bestR tracks it at r = -0.99 on the miss side. Hits stay
+  // opaque, which is what the extra rays in main() tidy up.
+  float pxK = 2.0 * uTanHalf / uRes.y;
   float t = uCamZ - 140.0;
   bool hit = false;
+  float bestR = 1e9, tBest = t;
   for (int i = 0; i < 96; i++) {
     vec3 p = ro + rd * t;
     float d = map(p);
+    float r = d / (pxK * t);
+    if (r < bestR) { bestR = r; tBest = t; }
     if (d < 0.02) { hit = true; break; }
     t += max(d, 0.01) * 0.9;
     if (t > uCamZ + 300.0) break;
   }
-  if (!hit) discard;
+  edge = (!hit && bestR < 1.5) ? 1.0 : 0.0;
+  float cover = hit ? 1.0 : clamp(0.5 - bestR, 0.0, 1.0);
+  if (cover <= 0.0) return vec4(0.0);
+  if (!hit) t = tBest;
 
   vec3 p = ro + rd * t;
   vec3 n = normalAt(p);
@@ -1054,6 +1092,16 @@ void main() {
   // one soft pixel at preview size and at 2x export alike.
   float pxmm = 2.0 * uTanHalf * max(uCamZ - (uRot * p).z, 1.0) / uRes.y;
   float aa = pxmm * 0.75;
+  // pxmm is the footprint across the ray, but dGlass and dScreen are measured
+  // in the plane of the face, which a tilted pixel covers more of. The stretch
+  // along the edge normal g is sqrt(1 + (g.rd / rd.z)^2) — about 1.05 at the
+  // presets, 2 at a 60 degree turn, 3.8 at 75. The 0.15 floor bounds it edge-on.
+  vec2 hG = vec2(W * 0.5 - LIP_W, H * 0.5 - LIP_W);
+  float rG = max(CORNER - LIP_W, 0.01);
+  vec2 g = vec2(sdRRect(p.xy + vec2(0.01, 0.0), hG, rG) - sdRRect(p.xy - vec2(0.01, 0.0), hG, rG),
+                sdRRect(p.xy + vec2(0.0, 0.01), hG, rG) - sdRRect(p.xy - vec2(0.0, 0.01), hG, rG));
+  float kG = dot(g / max(length(g), 1e-6), rd.xy) / max(abs(rd.z), 0.15);
+  aa *= sqrt(1.0 + kG * kG);
 
   float onFront = smoothstep(0.30, 0.55, n.z) * step(D * 0.5 - EDGE - 0.35, p.z);
   float glassA = onFront * (1.0 - smoothstep(-aa, aa, dGlass));
@@ -1067,7 +1115,10 @@ void main() {
              * step(D * 0.5 - EDGE - 0.5, p.z);
 
   vec3 design = vec3(0.0);
-  if (n.z > 0.0 && dScreen < 0.0) {
+  // Out to dScreen < aa rather than < 0, and faded by coverage at the end of the
+  // block: the display edge against the black bezel was a hard test, and on the
+  // prototype it was the largest single source of stair-stepping on the rail.
+  if (n.z > 0.0 && dScreen < aa) {
     if (uHasTex > 0.5) {
       vec3 fit = fitUV(vec2(u, v), sh / sw, uSrcAspect, uFitMode, uImgPan, uImgZoom);
       design = fit.z > 0.5 ? vec3(0.0)
@@ -1079,26 +1130,22 @@ void main() {
     // Notch, in millimetres rather than screen uv. In uv the radii come out
     // elliptical, because u spans the width and v the height of a 2.17:1
     // display — which is why the first attempt was a black box.
-    float hw = NOTCH_W * 0.5;
-    float top = sh + 4.0, bot = sh - NOTCH_H;   // extends past the top edge so
-    float cy = (top + bot) * 0.5;               // only the lower corners round
-    float dn = sdRRect(vec2(p.x, p.y - cy), vec2(hw, (top - bot) * 0.5), NOTCH_R);
-    bool notch = dn < 0.0;
-
-    // Concave fillets where the display curves into the shoulders. This is the
-    // detail that makes it read as an iPhone instead of a rectangle.
-    float ax = abs(p.x);
-    if (!notch && ax >= hw && ax <= hw + NOTCH_F && p.y >= sh - NOTCH_F && p.y <= sh) {
-      if (length(vec2(ax - (hw + NOTCH_F), p.y - (sh - NOTCH_F))) > NOTCH_F) notch = true;
-    }
-    if (notch) design = vec3(0.018);
+    // The box extends past the top edge so only the lower corners round, and
+    // the concave fillets where the display curves into the shoulders are what
+    // make it read as an iPhone instead of a rectangle — both live in sdNotch.
+    // Each layer is blended over the one below by its own coverage rather than
+    // hard tested: a boolean left the cutout, pill and camera stair-stepped, and
+    // the fillet's old p.y <= sh cap let the design bleed through as a grey line
+    // along the top edge once the display itself was blended out to dScreen < aa.
+    design = mix(design, vec3(0.018), 1.0 - smoothstep(-aa, aa, sdNotch(p.xy, sh)));
 
     float sp = sdRRect(vec2(p.x, p.y - (sh - 1.75)), vec2(4.7, 0.42), 0.42);
-    if (sp < 0.0) design = vec3(0.115, 0.118, 0.125);
+    design = mix(design, vec3(0.115, 0.118, 0.125), 1.0 - smoothstep(-aa, aa, sp));
 
     float cd = length(vec2(p.x + 8.6, p.y - (sh - 3.7)));
-    if (cd < 1.15) design = vec3(0.055, 0.058, 0.070);
-    if (cd < 0.62) design = vec3(0.075, 0.115, 0.235);
+    design = mix(design, vec3(0.055, 0.058, 0.070), 1.0 - smoothstep(-aa, aa, cd - 1.15));
+    design = mix(design, vec3(0.075, 0.115, 0.235), 1.0 - smoothstep(-aa, aa, cd - 0.62));
+    design *= 1.0 - smoothstep(-aa, aa, dScreen);
   }
 
   // One finish over the whole chassis — rails, back, camera bump and the bottom
@@ -1126,7 +1173,44 @@ void main() {
   // silhouette. A float coverage rather than a boolean, because the boundary
   // sits a few pixels from the outline and a hard test crawls along it.
   vec3 col = mix(encode(metal), glass, glassA);
-  gl_FragColor = vec4(col, 1.0);
+
+  // What an analytic edge cannot fix: the crease where a button or the bump
+  // meets the chassis (a jump in the normal, not in a mask), the glass/lip band,
+  // and the EDGE chamfer, which is under a pixel at most views. The crease test
+  // is the middle of the three part distances, i.e. near two parts at once.
+  float dBody = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+  float dBump = sdPrism(p - vec3(BUMP_OX, BUMP_OY, -(D * 0.5 + BUMP_D * 0.5 - 0.4)),
+                        vec2(BUMP_W * 0.5, BUMP_H * 0.5), BUMP_R, BUMP_D * 0.5, 0.8);
+  float dBtn = sdButtons(p);
+  float crease = max(min(dBody, dBump), min(max(dBody, dBump), dBtn));
+  float dRail = sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - EDGE, CORNER - EDGE);
+  float dFace = abs(p.z) - (D * 0.5 - EDGE);
+  if (crease < 2.0 * pxmm || abs(dGlass) < 2.0 * aa ||
+      (dRail > -2.0 * pxmm && dFace > -2.0 * pxmm)) edge = 1.0;
+
+  return vec4(col, cover);
+}
+
+// Four more rays on a rotated grid, only where shadeRay flagged an edge — a thin
+// outline, about 2.5% of the frame at the presets, so the whole-frame cost
+// barely moves. Averaged premultiplied, written straight. Prototype band error
+// against a 16-ray reference fell from 14.9 to 3.8 (0-255) with this, the
+// silhouette coverage and the analytic seams together.
+void main() {
+  float edge, e;
+  vec4 c = shadeRay(gl_FragCoord.xy, edge);
+  if (edge > 0.5) {
+    vec3 acc = c.rgb * c.a;
+    float cov = c.a;
+    vec4 s = shadeRay(gl_FragCoord.xy + vec2( 0.125,  0.375), e); acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2(-0.375,  0.125), e);      acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2(-0.125, -0.375), e);      acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2( 0.375, -0.125), e);      acc += s.rgb * s.a; cov += s.a;
+    c = vec4(acc / max(cov, 1e-4), cov / 5.0);
+  }
+  if (c.a <= 0.0) discard;
+  // Straight alpha, as SCREEN_FRAG writes — the context is premultipliedAlpha: false.
+  gl_FragColor = c;
 }
 `;
 
@@ -1354,16 +1438,24 @@ float sweepHit(vec3 ro, vec3 rd, out vec3 p, out vec3 n) {
   return t;
 }
 
-// Sphere-trace the chassis prism. Distance travelled, or -1 for a miss.
-float marchBody(vec3 ro, vec3 rd) {
+// Sphere-trace the chassis prism. Returns coverage, 0..1, and the distance
+// travelled in tHit — to the hit, or to the closest approach on a near miss.
+// Same closest-miss coverage as STUDIO_FRAG's silhouette, so the reflected
+// outline is not stair-stepped either. t0 is the path already run to the floor,
+// so pxK * (t0 + t) is the pixel footprint along the unfolded mirror path.
+float marchBody(vec3 ro, vec3 rd, float t0, float pxK, out float tHit) {
   float t = 0.0;
+  float bestR = 1e9;
+  tHit = 0.0;
   for (int i = 0; i < 40; i++) {
     float d = sdPrism(ro + rd * t, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
-    if (d < 0.05) return t;
+    float r = d / (pxK * (t0 + t));
+    if (r < bestR) { bestR = r; tHit = t; }
+    if (d < 0.05) { tHit = t; return 1.0; }
     t += max(d, 0.05) * 0.9;
     if (t > REFL_LEN) break;
   }
-  return -1.0;
+  return clamp(0.5 - bestR, 0.0, 1.0);
 }
 
 void main() {
@@ -1399,11 +1491,12 @@ void main() {
   // geometry, but it confines itself to surfaces that can actually reflect and
   // carries onto the curve for free.
   if (uReflect > 0.001 && valid > 0.5) {
-    float th = marchBody(uRotT * p, uRotT * reflect(rd, n));
-    if (th >= 0.0) {
+    float th;
+    float cov = marchBody(uRotT * p, uRotT * reflect(rd, n), t, 2.0 * uTanHalf / uRes.y, th);
+    if (cov > 0.0) {
       float fade = clamp(1.0 - th / REFL_LEN, 0.0, 1.0);
       float lum = clamp(dot(uFinish, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-      outc *= 1.0 - fade * fade * uReflect * (1.0 - lum);
+      outc *= 1.0 - cov * fade * fade * uReflect * (1.0 - lum);
     }
   }
 
