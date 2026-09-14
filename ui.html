@@ -944,12 +944,35 @@ float cavityVis(vec3 p) {
   return clamp(ap * ap / (ap * ap + depth * depth), 0.0, 1.0);
 }
 
+// Edge radius where the holes, screws and port meet the bottom face. With a hard
+// max() the rim was a knife edge, and normalAt's 0.035mm stencil turned it into a
+// ~0.07mm bevel that caught the softboxes at 3-4.4x the face and read as a crisp
+// white ring — sitting at depth 0, cavityVis rightly left it at full visibility.
+// A real machined hole has a radius, and its highlight stays soft because its
+// width is in millimetres, not stencil width. Picked on the numpy prototype over
+// all 15 cuts: 0.08 still spiked at 2-3x; 0.15 took Laid right to ~1.5x and left
+// Steep a graded ~2x highlight; 0.25 and 0.35 widened that band and grew the
+// openings further (0.48 -> 0.56mm at 0.15, 0.64 at 0.25).
+const float CUT_RIM = 0.15;
+
+// Polynomial smooth max, identical to max(a, b) once b is more than k below a, so
+// the field is unchanged everywhere outside a k-band around the cut surfaces. The
+// early return is what makes that exact: away from the cuts b is around -100mm,
+// and mix() at h = 1 compiles to b + (a - b) on the GPU, which is off by ~1e-5 in
+// float32. Measured on ANGLE/D3D11 that flipped up to 11 knife-edge pixels
+// elsewhere on the phone per 4x frame; with the return, 0.
+float smax(float a, float b, float k) {
+  if (b < a - k) return a;
+  float h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) + k * h * (1.0 - h);
+}
+
 float map(vec3 p) {
   float body = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
   vec3 q = p - vec3(BUMP_OX, BUMP_OY, -(D * 0.5 + BUMP_D * 0.5 - 0.4));
   float bump = sdPrism(q, vec2(BUMP_W * 0.5, BUMP_H * 0.5), BUMP_R, BUMP_D * 0.5, 0.8);
   float d = min(min(body, bump), sdButtons(p));
-  return max(d, -sdBottomCuts(p));
+  return smax(d, -sdBottomCuts(p), CUT_RIM);
 }
 
 vec3 normalAt(vec3 p) {
