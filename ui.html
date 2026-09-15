@@ -1424,16 +1424,21 @@ float sdSideCuts(vec3 p) {
 // on references/macbook-front.png through the prototype's fitted reference camera:
 // 62.4mm wide at the top edge, 4.4mm down the front face, ends quarter circles of
 // radius 4.4 (a rounded rectangle whose corner radius is its full height), centred.
+// Width, height and ends agree with references/macbook-spaceblack-open.png as a
+// fraction of base width (within 1% on width).
+// Depth into the deck MEASURED on references/macbook-spaceblack-open.png (apple.com,
+// looking down ~10 deg onto the deck): 3.7mm +-1.5mm, scaled from the photo's
+// 14-inch base (both references are 14-inch; the Studio laptop takes the indent
+// in proportion). Low precision: 1mm of depth is ~0.5px in that photo.
 // Section: a circle from the face's lower edge back to the deck, centre 6mm along
-// the chord's forward-up bisector (surface 12 deg off level at the face, 70 at the
-// deck); rim 0.6mm. Its rim highlights stay below the base's own front top edge on
-// the same view sweep (1.5x exceeded on 7% of lines against 36%), so no ring.
-// DEPTH IS AN ESTIMATE, UNVERIFIED: no reference shows how far the indent runs back
-// into the deck; 5mm is assumed. Replace IND_DEPTH, and re-derive IND_SEC from it,
-// when a top-down or three-quarter photo of the front edge is available.
+// the chord's forward-up bisector (surface 24 deg off level at the face, 76 at the
+// deck). IND_SEC is derived from IND_DEPTH and IND_HH; re-derive it if either
+// changes. Rim 0.6mm, swept for this shape rather than borrowing PORT_RIM: rim
+// highlights exceed 1.5x on 3% of lines over 40 views and both finishes (0.15mm:
+// 7%), against 36% for the base's own front top edge, so no ring.
 const float IND_HW = 31.2, IND_HH = 4.4;
-const float IND_DEPTH = 5.0;                     // ESTIMATE, see above
-const vec3  IND_SEC = vec3(1.4638, 2.3043, 6.8622); // circle centre z (from the face), y; radius
+const float IND_DEPTH = 3.7;                     // measured, +-1.5mm, see above
+const vec3  IND_SEC = vec3(2.7422, 1.6616, 6.6530); // circle centre z (from the face), y; radius
 const float IND_RIM = 0.6;
 
 float frontCut(vec3 p) {
@@ -2369,9 +2374,10 @@ const FINISHES = {
 // light: side-wall tint within 1-2% (photo R/G 1.00, B/G 1.02 for both).
 // KNOWN LIMITATION, for a later material-model change (no workaround here): in the
 // photo Silver is 4.8x brighter than Space Black, but the coat model reaches only
-// about 2.2x even at these extreme values (the phone's Silver/Midnight is 1.6-1.8x),
-// and grazing reflection dominates flat faces, so a Space Black deck renders
-// mid-grey where the photo's is black.
+// about 2.2x even at these extreme values (the phone's Silver/Midnight is 1.6-1.8x).
+// The Space Black deck is not black in the references either: it is brighter than
+// the front face, 1.55x in references/macbook-spaceblack-open.png against 1.31x in
+// the Hero front render, so the deck's grazing brightness is broadly right.
 const LAPTOP_FINISHES = {
   'Space Black': [0.040, 0.040, 0.043],
   Silver: [0.864, 0.852, 0.918]
