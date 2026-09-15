@@ -320,6 +320,8 @@
   <h3>Features</h3>
   <div class="seg" id="mode"></div>
   <div id="studiobox" style="display:none">
+    <div class="sub">Device</div>
+    <div class="seg" id="studiodevice"></div>
     <div class="sub">Finish</div>
     <div class="chips" id="finishes"></div>
   </div>
@@ -366,6 +368,7 @@
   <button class="select anglebtn" id="presetbtn" aria-expanded="false"><canvas id="presetthumb" width="56" height="56"></canvas><span id="presetname"></span><span class="chev"></span></button>
   <div class="anglemenu" id="presets" hidden></div>
   <div class="dials" id="dials"></div>
+  <div class="slider" id="lidrow" style="display:none;margin:6px 0 4px"><span class="name">Lid angle</span><input type="range" id="lid" min="0" max="135" value="110"><span class="val" id="lido"></span></div>
   <div class="switchrow" id="adjustrow" style="margin-top:4px"><label for="adjust">Adjust</label>
     <span class="switch"><input type="checkbox" id="adjust"><span class="track"></span><span class="knob"></span></span></div>
   <div id="adjustbox" style="padding-top:12px">
@@ -480,6 +483,23 @@ const PRESETS = {
   'Laid left': { rx: -34, ry: 28, rz: 27, persp: 66 },
   'Laid right': { rx: -34, ry: -28, rz: -27, persp: 66 },
   'Steep': { rx: -45, ry: 22, rz: 20, persp: 70 }
+};
+
+// Studio laptop angles. The laptop is base-anchored, so a view from above is a
+// POSITIVE tilt — it turns the base's top face toward the camera — which is the
+// opposite sign to the phone's laid-back presets above. Each also sets the lid.
+const LAPTOP_PRESETS = {
+  'Front': { rx: 10, ry: 0, rz: 0, persp: 25, lid: 105 },
+  // The marketing reference shot (references/macbook-front.png) in Studio terms: its
+  // fitted camera is just below the deck (tilt -4), lid at 86, and close — 1.19m
+  // from the pivot, which is Perspective 94. The photo is also a tighter crop; raise
+  // Size to match that.
+  'Hero front': { rx: -4, ry: 0, rz: 0, persp: 94, lid: 86 },
+  'Three-quarter left': { rx: 18, ry: 32, rz: 0, persp: 35, lid: 110 },
+  'Three-quarter right': { rx: 18, ry: -32, rz: 0, persp: 35, lid: 110 },
+  'From above': { rx: 45, ry: 20, rz: 0, persp: 40, lid: 115 },
+  'Side': { rx: 6, ry: 70, rz: 0, persp: 20, lid: 100 },
+  'Closed': { rx: 30, ry: 28, rz: 0, persp: 35, lid: 0 }
 };
 
 const state = {
@@ -1246,6 +1266,409 @@ void main() {
 }
 `;
 
+// 16-inch MacBook Pro for Studio: a base and a lid, two rounded slabs joined at a
+// hinge. Its own program rather than a branch in STUDIO_FRAG, so the phone
+// shader stays byte-identical; the helper copies below follow the same
+// self-contained convention as SCREEN_FRAG and BACKDROP_FRAG.
+//
+// Base-anchored: x right, y up, z toward the front edge, the base's top face at
+// y = 0. The lid swings about an axis along x just inside the base's rear edge,
+// by the lid angle (0 closed, 90 upright). The axis is placed so that closed the
+// lid rests flush on the base, and at 90 its inner face touches the base's rear
+// with its bottom edge 7mm below the base top, both as measured off the side
+// photo. Every number was measured or derived in the offline prototype, whose
+// overlays are in references/prototype-review: width, depth and closed height
+// published; lid and base thickness, edge radii and the hinge drop off the side
+// photo; bezels, corner radii and notch off the flattened front and close-up
+// photos. LAPTOP in JS carries the same numbers for framing, the design quad and
+// the shadow, so the two have to move together.
+const LAPTOP_FRAG = `
+precision highp float;
+
+uniform vec2  uRes;
+uniform mat3  uRot;      // object -> world, for normals
+uniform mat3  uRotT;     // world -> object, for rays
+uniform float uCamZ, uTanHalf, uAspect;
+uniform float uRadius;   // bounding-sphere radius about uCenter; bounds the march
+uniform vec3  uCenter;   // rotation pivot in object space, recomputed per lid angle
+uniform vec2  uLidCS;    // cos, sin of the lid angle
+uniform vec3  uFinish;
+uniform sampler2D uTex;
+uniform float uHasTex;
+uniform float uSrcAspect, uFitMode;
+uniform vec2 uImgPan;
+uniform float uImgZoom;
+
+const float W = 355.7, DEP = 248.1;              // published
+const float TB = 11.95, TL = 3.3, GAP = 0.3;     // base body, lid, closed gap
+const float LL = 245.0;                          // lid length
+const float RP = 10.5, RT = 0.5, RB = 4.4, RL = 1.2;
+const float HE = 3.65, HT0 = 3.65;               // lid behind the axis; axis to inner face
+const float DW = 345.6, DH = 223.4;              // display, from 3456x2234 @ 254 ppi
+const float TOP_BEZ = 5.5, DISP_R = 4.5;         // display corners rounded at the top only
+const float NOTCH_W = 42.0, NOTCH_H = 7.3, NOTCH_R = 2.3, NOTCH_F = 1.2;
+const float LIP_W = 1.0;                         // aluminium rim showing round the glass
+const float HINGE_BAND = 3.4;                    // dark hinge cover along the base's rear
+// Edge radius where the side ports meet the wall. A sharp rim spikes into a bright
+// one-pixel ring at some views, as the phone's holes did; swept on the prototype
+// over all seven ports and 40 view directions: sharp 118 spikes (worst 3.05x the
+// wall), 0.05 67, 0.10 33, 0.15 7-11 (worst 2.1x), 0.25 64, 0.40 up to 60.
+const float PORT_RIM = 0.15;
+const float AZ = -DEP * 0.5 + HE;
+const float AY = GAP - HE;
+const float S_DISP = LL - HE - TOP_BEZ - DH * 0.5;   // display centre along the lid
+
+const float ROUGH_BODY = 0.38;
+const float COAT_F0 = 0.05, COAT_MIX = 0.55, BODY_K = 0.22;
+const float HAIR_W = 0.10, HAIR_K = 0.30;
+
+float sdRRect(vec2 p, vec2 half_, float r) {
+  vec2 q = abs(p) - half_ + r;
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+// Rounded slab from a plan distance and a height coordinate. The base's top edge
+// is tight and its bottom edge generous, so the radius switches at mid-height;
+// on the flat side walls both branches give the plan distance, so the field stays
+// continuous there.
+float sdBase(vec3 p) {
+  float r = p.y > -TB * 0.5 ? RT : RB;
+  float inner = sdRRect(p.xz, vec2(W, DEP) * 0.5, RP) + r;
+  float wy = abs(p.y + TB * 0.5) - (TB * 0.5 - r);
+  return min(max(inner, wy), 0.0) + length(max(vec2(inner, wy), 0.0)) - r;
+}
+
+// Object point into the lid's frame: x, distance along the lid from the axis,
+// distance across it (the inner, display face sits at HT0).
+vec3 lidLocal(vec3 p) {
+  float zr = p.z - AZ, yr = p.y - AY;
+  return vec3(p.x, zr * uLidCS.x + yr * uLidCS.y, -zr * uLidCS.y + yr * uLidCS.x);
+}
+
+float sdLidPlan(vec3 q) {
+  return sdRRect(vec2(q.x, q.y - (LL * 0.5 - HE)), vec2(W, LL) * 0.5, RP);
+}
+
+float sdLid(vec3 p) {
+  vec3 q = lidLocal(p);
+  float inner = sdLidPlan(q) + RL;
+  float wt = abs(q.z - (HT0 + TL * 0.5)) - (TL * 0.5 - RL);
+  return min(max(inner, wt), 0.0) + length(max(vec2(inner, wt), 0.0)) - RL;
+}
+
+// Plain union. The lid's lower edge passes up to 3.2mm into the base while it
+// swings, but always inside it (checked on the prototype at 0-135 degrees), so
+// nothing pokes out and the union needs no cut.
+// --- side ports -------------------------------------------------------------
+// Cut into the base's side walls rather than painted: they are seen at grazing
+// angles in the side and three-quarter views, where a painted port reads as a
+// decal and an opening needs its depth. Same construction as STUDIO_FRAG's bottom
+// cuts: each port is a profile in the wall plane (z along the side, y up) extruded
+// along the wall normal from 0.3mm outside to its depth inside.
+//
+// Left side, measured on references/macbook-side.png (the silver 16-inch), all
+// centred 3.8mm below the base top: MagSafe 3 (a 10.9 x 1.3 slot in a shallow
+// 17.6 x 4.0 pocket), two Thunderbolt 8.4 x 2.6, headphone jack 4.0.
+// Right side is an ESTIMATE: no reference shows the 16-inch's right side, so this
+// is the 14-inch's measured HDMI 14.2 x 4.2, Thunderbolt and SDXC 25.6 x 2.4, at
+// the same distances from the rear. Depths are not visible in any photo: chosen.
+
+float smax(float a, float b, float k) {
+  if (b < a - k) return a;   // exact away from the cuts, as in STUDIO_FRAG
+  float h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) + k * h * (1.0 - h);
+}
+
+float cyl(float radial, float axial) {
+  return min(max(radial, axial), 0.0) + length(max(vec2(radial, axial), 0.0));
+}
+
+// One port on the wall at x = side * W/2. Keeps the nearest cut and its in-plane
+// distance, which portVis needs for the cavity shading.
+void port(vec3 p, float side, float z, float hl, float hh, float r, float y, float depth,
+          inout float d, inout float radial) {
+  float rad = sdRRect(vec2(p.z - z, p.y - y), vec2(hl, hh), r);
+  float inward = (side * W * 0.5 - p.x) * side;
+  float c = cyl(rad, abs(inward - (depth - 0.3) * 0.5) - (depth + 0.3) * 0.5);
+  if (c < d) { d = c; radial = rad; }
+}
+
+float sideCuts(vec3 p, out float radial) {
+  radial = 1e3;
+  // Only near a side wall, along the ports' span and the base's height; nothing
+  // can be close elsewhere, and a large distance makes smax return the base exactly.
+  if (abs(abs(p.x) - W * 0.5) > 14.0 || p.z > -26.0 || p.z < -108.0 ||
+      p.y > 1.0 || p.y < -TB - 1.0) return 1e3;
+  float d = 1e3;
+  if (p.x < 0.0) {
+    port(p, -1.0, -84.45, 8.8,  2.0,  2.0,  -4.1, 0.6, d, radial);   // MagSafe pocket
+    port(p, -1.0, -84.35, 5.45, 0.65, 0.65, -3.8, 2.0, d, radial);   // MagSafe slot
+    port(p, -1.0, -66.05, 4.2,  1.3,  1.3,  -3.8, 5.0, d, radial);   // Thunderbolt
+    port(p, -1.0, -51.2,  4.2,  1.3,  1.3,  -3.8, 5.0, d, radial);   // Thunderbolt
+    port(p, -1.0, -38.45, 2.0,  2.0,  2.0,  -3.8, 8.0, d, radial);   // headphone jack
+  } else {
+    port(p,  1.0, -91.35, 7.1,  2.1,  0.6,  -4.4, 6.0, d, radial);   // HDMI (estimate)
+    port(p,  1.0, -73.1,  4.2,  1.3,  1.3,  -3.8, 5.0, d, radial);   // Thunderbolt (estimate)
+    port(p,  1.0, -48.85, 12.8, 1.2,  1.2,  -3.8, 4.0, d, radial);   // SDXC (estimate)
+  }
+  return d;
+}
+
+float sdSideCuts(vec3 p) {
+  float radial;
+  return sideCuts(p, radial);
+}
+
+// --- front thumb indent ------------------------------------------------------
+// The scoop at the centre of the front edge for opening the lid. Opening measured
+// on references/macbook-front.png through the prototype's fitted reference camera:
+// 62.4mm wide at the top edge, 4.4mm down the front face, ends quarter circles of
+// radius 4.4 (a rounded rectangle whose corner radius is its full height), centred.
+// Section: a circle from the face's lower edge back to the deck, centre 6mm along
+// the chord's forward-up bisector (surface 12 deg off level at the face, 70 at the
+// deck); rim 0.6mm. Its rim highlights stay below the base's own front top edge on
+// the same view sweep (1.5x exceeded on 7% of lines against 36%), so no ring.
+// DEPTH IS AN ESTIMATE, UNVERIFIED: no reference shows how far the indent runs back
+// into the deck; 5mm is assumed. Replace IND_DEPTH, and re-derive IND_SEC from it,
+// when a top-down or three-quarter photo of the front edge is available.
+const float IND_HW = 31.2, IND_HH = 4.4;
+const float IND_DEPTH = 5.0;                     // ESTIMATE, see above
+const vec3  IND_SEC = vec3(1.4638, 2.3043, 6.8622); // circle centre z (from the face), y; radius
+const float IND_RIM = 0.6;
+
+float frontCut(vec3 p) {
+  // Outside these bounds the cut cannot reach the base's field (checked on the
+  // prototype: bounded and unbounded fields identical at 800k points).
+  if (abs(p.x) > IND_HW + 8.0 || abs(p.z - DEP * 0.5) > 14.0 ||
+      p.y > 4.0 || p.y < -TB - 1.0) return 1e3;
+  float prof = sdRRect(p.xy, vec2(IND_HW, IND_HH), IND_HH);
+  float sec = length(vec2(p.z - DEP * 0.5 - IND_SEC.x, p.y - IND_SEC.y)) - IND_SEC.z;
+  return max(sec, prof);
+}
+
+// Fraction of the sky a point inside a port can see, as STUDIO_FRAG's cavityVis:
+// without it a 5mm socket is lit like the wall and reads as a bump, not a hole.
+float portVis(vec3 p, float cut, float radial) {
+  if (cut > 0.05) return 1.0;
+  float ap = max(-radial, 0.02);
+  float depth = max(W * 0.5 - abs(p.x), 0.0);
+  return clamp(ap * ap / (ap * ap + depth * depth), 0.0, 1.0);
+}
+
+float map(vec3 p) {
+  return min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM), sdLid(p));
+}
+
+vec3 normalAt(vec3 p) {
+  vec2 e = vec2(0.05, 0.0);
+  return normalize(vec3(
+    map(p + e.xyy) - map(p - e.xyy),
+    map(p + e.yxy) - map(p - e.yxy),
+    map(p + e.yyx) - map(p - e.yyx)));
+}
+
+// --- generated studio environment, as STUDIO_FRAG ---
+vec3 softbox(vec3 d, vec3 axis, vec2 halfUV, vec3 colour, float intensity,
+             float softness, float rough) {
+  float ca = dot(d, axis);
+  if (ca <= 0.05) return vec3(0.0);
+  vec3 up = abs(axis.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(cross(up, axis));
+  vec3 b = cross(axis, t);
+  vec2 uv = vec2(dot(d, t), dot(d, b)) / ca;
+  float e = softness * (0.25 + 1.75 * rough);
+  float m = smoothstep(halfUV.x + e, halfUV.x - e, abs(uv.x)) *
+            smoothstep(halfUV.y + e, halfUV.y - e, abs(uv.y));
+  return m * colour * intensity;
+}
+
+vec3 environment(vec3 d, float rough) {
+  vec3 col = mix(vec3(0.075, 0.078, 0.086), vec3(0.17, 0.175, 0.195),
+                 clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
+  col += softbox(d, normalize(vec3(-0.34, 0.70, 0.63)), vec2(0.66, 0.46), vec3(1.00, 0.98, 0.95), 5.2, 0.40, rough);
+  col += softbox(d, normalize(vec3( 0.88, 0.12, 0.36)), vec2(0.40, 0.62), vec3(0.86, 0.90, 1.00), 2.6, 0.48, rough);
+  col += softbox(d, normalize(vec3( 0.14, 0.58,-0.82)), vec2(0.50, 0.28), vec3(1.00, 0.95, 0.88), 3.0, 0.42, rough);
+  col += softbox(d, normalize(vec3(-0.30, 0.34, 0.89)), vec2(0.50, 0.70), vec3(1.0), 3.4, 0.55, rough);
+  return col;
+}
+
+vec3 envSpec(vec3 d, float rough) {
+  vec3 up = abs(d.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(cross(up, d));
+  vec3 b = cross(d, t);
+  float a = rough * rough * 1.7;
+  vec3 s = environment(d, rough) * 2.0;
+  for (int i = 0; i < 6; i++) {
+    float ang = float(i) * 1.0471976;
+    s += environment(normalize(d + (t * cos(ang) + b * sin(ang)) * a), rough);
+  }
+  return s / 8.0;
+}
+
+// Fifth copy of fitUV. See the note above imgPanRange in JS.
+vec3 fitUV(vec2 uv, float sa, float ia, float mode, vec2 pan, float zm) {
+  vec2 s = (uv - 0.5) / zm + 0.5 + pan;
+  vec2 t = s;
+  float bar = 0.0;
+  if (mode > 0.5 && mode < 1.5) {
+    if (ia > sa) t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    else         t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+  } else if (mode >= 1.5) {
+    if (ia > sa) t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+    else         t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) bar = 1.0;
+  }
+  return vec3(t, bar);
+}
+
+vec3 fres(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
+vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
+
+// The laptop notch in display millimetres, same construction as STUDIO_FRAG's
+// sdNotch including its fillet overlap (a fillet butted against the box leaves a
+// zero-distance seam that a smoothstep paints as a line). Close-up photo: bottom
+// corners 2.3mm, shoulders where the display turns into the notch 1.2mm.
+float sdNotch(vec2 p) {
+  float sh = DH * 0.5, hw = NOTCH_W * 0.5;
+  float top = sh + 4.0, bot = sh - NOTCH_H;
+  float cy = (top + bot) * 0.5;
+  float dn = sdRRect(vec2(p.x, p.y - cy), vec2(hw, (top - bot) * 0.5), NOTCH_R);
+  float ax = abs(p.x);
+  float fillet = max(max((hw - NOTCH_F) - ax, ax - (hw + NOTCH_F)),
+                     max((sh - NOTCH_F) - p.y,
+                         NOTCH_F - length(vec2(ax - (hw + NOTCH_F), p.y - (sh - NOTCH_F)))));
+  return min(dn, fillet);
+}
+
+vec4 shadeRay(vec2 fc, out float edge) {
+  vec2 ndc = vec2((fc.x / uRes.x) * 2.0 - 1.0,
+                  1.0 - (fc.y / uRes.y) * 2.0);
+  ndc.y = -ndc.y;
+  vec3 dir = normalize(vec3(ndc.x * uTanHalf * uAspect, ndc.y * uTanHalf, -1.0));
+  vec3 ro = uCenter + uRotT * vec3(0.0, 0.0, uCamZ);
+  vec3 rd = uRotT * dir;
+
+  // Same closest-miss silhouette coverage as STUDIO_FRAG. The march limits are
+  // the bounding sphere rather than the phone's fixed 140/300mm, and the hit test
+  // is pixel-relative: at laptop distances a fixed 0.02mm is a tiny fraction of a
+  // pixel and grazing rays along the 356mm deck would run out of steps.
+  float pxK = 2.0 * uTanHalf / uRes.y;
+  float t = max(uCamZ - uRadius, 1.0);
+  bool hit = false, left = false;
+  float bestR = 1e9, tBest = t, dLast = 1e9, pxLast = 1.0;
+  // A ray nearly parallel to the deck or the underside closes only a few percent of
+  // its distance per step and needs up to ~470; at 160 those rays ran out and the
+  // closest-miss coverage below turned the deck see-through (Hero front: 12 rows
+  // fully clear at 2592x3240). Rays that hit or leave the sphere still stop early.
+  for (int i = 0; i < 480; i++) {
+    vec3 p = ro + rd * t;
+    float d = map(p);
+    float px = pxK * t;
+    float r = d / px;
+    dLast = d; pxLast = px;
+    if (r < bestR) { bestR = r; tBest = t; }
+    if (d < 0.05 * px) { hit = true; break; }
+    t += max(d * 0.9, 0.02 * px);
+    if (t > uCamZ + uRadius) { left = true; break; }
+  }
+  // Still marching and within half a pixel of a surface: a grazing hit, not a miss.
+  // Silhouette rays leave the sphere, so their coverage is unchanged.
+  if (!hit && !left && dLast < 0.5 * pxLast) hit = true;
+  edge = (!hit && bestR < 1.5) ? 1.0 : 0.0;
+  float cover = hit ? 1.0 : clamp(0.5 - bestR, 0.0, 1.0);
+  if (cover <= 0.0) return vec4(0.0);
+  if (!hit) t = tBest;
+
+  vec3 p = ro + rd * t;
+  vec3 n = normalAt(p);
+  vec3 nw = uRot * n;
+  vec3 vw = uRot * (-rd);
+  float pxmm = pxK * t;
+
+  float dBase = sdBase(p), dLid = sdLid(p);
+  float onLid = step(dLid, dBase);
+  vec3 q = lidLocal(p);
+  vec3 tDir = vec3(0.0, uLidCS.x, -uLidCS.y);    // across the lid, away from the display
+  float onFace = onLid * smoothstep(0.55, 0.85, dot(n, -tDir))
+               * step(abs(q.z - HT0), 0.6 + pxmm);
+  // A tilted pixel covers more of the face than pxmm; bounded edge-on.
+  float aa = pxmm * 0.75 / max(abs(dot(rd, tDir)), 0.15);
+
+  float xd = q.x, yd = q.y - S_DISP;
+  float dDisp = sdRRect(vec2(xd, yd), vec2(DW, DH) * 0.5, yd > 0.0 ? DISP_R : 0.0);
+  float dGlass = sdRRect(vec2(xd, q.y - (LL * 0.5 - HE)),
+                         vec2(W * 0.5 - LIP_W, LL * 0.5 - LIP_W), RP - LIP_W);
+  float glassA = onFace * (1.0 - smoothstep(-aa, aa, dGlass));
+
+  vec3 design = vec3(0.0);
+  if (dDisp < aa) {
+    if (uHasTex > 0.5) {
+      float u = (xd + DW * 0.5) / DW;
+      float v = (DH * 0.5 - yd) / DH;
+      vec3 fit = fitUV(vec2(u, v), DH / DW, uSrcAspect, uFitMode, uImgPan, uImgZoom);
+      design = fit.z > 0.5 ? vec3(0.0)
+                           : texture2D(uTex, clamp(fit.xy, 0.001, 0.999)).rgb;
+    } else {
+      design = vec3(0.93);
+    }
+    design = mix(design, vec3(0.018), 1.0 - smoothstep(-aa, aa, sdNotch(vec2(xd, yd))));
+    design *= 1.0 - smoothstep(-aa, aa, dDisp);
+  }
+
+  vec3 r = reflect(-vw, nw);
+  float ndv = clamp(dot(nw, vw), 0.0, 1.0);
+  vec3 F = fres(vec3(COAT_F0) + (uFinish - vec3(COAT_F0)) * COAT_MIX, ndv);
+  vec3 metal = envSpec(r, ROUGH_BODY) * F
+             + envSpec(nw, 0.95) * uFinish * (1.0 - F) * BODY_K;
+  // The black hinge cover along the base's rear edge, the dark band beside the
+  // lid in the side photo.
+  float hingeA = (1.0 - onLid) * step(p.z, -DEP * 0.5 + HINGE_BAND) * smoothstep(0.3, 0.7, n.y);
+  metal *= mix(1.0, 0.18, hingeA);
+  float cutRadial;
+  float dCut = sideCuts(p, cutRadial);
+  metal *= mix(portVis(p, dCut, cutRadial), 1.0, onLid);
+  // No darkening in the indent: it is an open scoop, and the prototype's cavity
+  // term made it read as a hole where the photo shows it lighter than the face.
+  float dInd = frontCut(p);
+  float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
+  metal *= mix(1.0, HAIR_K, seam);
+
+  vec3 refl = environment(r, 0.045);
+  vec3 f = fres(vec3(0.085), ndv);
+  vec3 glass = design * (1.0 - f) + encode(refl) * f;
+  vec3 col = mix(encode(metal), glass, glassA);
+
+  // Where one ray per pixel cannot resolve the result: where base and lid meet,
+  // the glass and display outlines, and the rounded slab edges, which are a few
+  // millimetres and under a pixel at most framings.
+  float nearBaseEdge = (1.0 - onLid) * step(-RB - 2.0 * pxmm, sdRRect(p.xz, vec2(W, DEP) * 0.5, RP));
+  float nearLidEdge = onLid * step(-RL - 2.0 * pxmm, sdLidPlan(q));
+  if (max(dBase, dLid) < 2.0 * pxmm ||
+      (onFace > 0.0 && (abs(dGlass) < 2.0 * aa || abs(dDisp) < 2.0 * aa)) ||
+      nearBaseEdge > 0.5 || nearLidEdge > 0.5 ||
+      (onLid < 0.5 && (abs(dCut) < 2.0 * pxmm || abs(dInd) < IND_RIM + 2.0 * pxmm))) edge = 1.0;
+
+  return vec4(col, cover);
+}
+
+// Four more rays on a rotated grid where shadeRay flagged an edge, as STUDIO_FRAG.
+void main() {
+  float edge, e;
+  vec4 c = shadeRay(gl_FragCoord.xy, edge);
+  if (edge > 0.5) {
+    vec3 acc = c.rgb * c.a;
+    float cov = c.a;
+    vec4 s = shadeRay(gl_FragCoord.xy + vec2( 0.125,  0.375), e); acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2(-0.375,  0.125), e);      acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2(-0.125, -0.375), e);      acc += s.rgb * s.a; cov += s.a;
+    s = shadeRay(gl_FragCoord.xy + vec2( 0.375, -0.125), e);      acc += s.rgb * s.a; cov += s.a;
+    c = vec4(acc / max(cov, 1e-4), cov / 5.0);
+  }
+  if (c.a <= 0.0) discard;
+  gl_FragColor = c;
+}
+`;
+
 // Screen only: the display content at the Studio pose, with the chassis gone.
 // Deliberately a separate program rather than a branch in STUDIO_FRAG — without
 // a body there is nothing to occlude the glass, so the 96-step march collapses
@@ -1406,6 +1829,15 @@ uniform vec3  uTint;     // the Canvas swatch
 uniform vec3  uFinish;   // so a Silver phone reflects lighter than a Midnight one
 uniform float uReflect;  // reflection strength, 0..1
 uniform float uPool;     // floor highlight, 0..1; 0 leaves the floor evenly lit
+// Laptop support. The phone passes device 0, scale 1, centre 0 and 40 steps,
+// which leaves every value below exactly what it was before these existed:
+// 150.0 * 1.0 and p + vec3(0.0) are exact in float, so the phone's sweep and
+// reflection are bit-for-bit unchanged.
+uniform float uDevice;     // 0 phone prism, 1 laptop
+uniform float uSweepScale; // sweep size relative to the phone's; laptop ~3.3
+uniform vec3  uCenter;     // laptop rotation pivot in object space
+uniform vec2  uLidCS;      // cos, sin of the lid angle
+uniform float uReflSteps;  // reflection march step cap
 
 const float W = 71.5, H = 146.7, D = 7.65;
 const float CORNER = 12.0, EDGE = 1.15;
@@ -1437,30 +1869,54 @@ float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
 
 vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
 
+// The laptop for the reflection: base and lid slabs only, same numbers and hinge
+// as LAPTOP_FRAG. Silhouette is all a reflection needs, so no display, notch or
+// hinge band.
+const float L_W = 355.7, L_DEP = 248.1, L_TB = 11.95, L_TL = 3.3, L_GAP = 0.3, L_LL = 245.0;
+const float L_RP = 10.5, L_RT = 0.5, L_RB = 4.4, L_RL = 1.2, L_HE = 3.65, L_HT0 = 3.65;
+const float L_AZ = -L_DEP * 0.5 + L_HE;
+const float L_AY = L_GAP - L_HE;
+
+float sdLaptop(vec3 p) {
+  float r = p.y > -L_TB * 0.5 ? L_RT : L_RB;
+  float inner = sdRRect(p.xz, vec2(L_W, L_DEP) * 0.5, L_RP) + r;
+  float wy = abs(p.y + L_TB * 0.5) - (L_TB * 0.5 - r);
+  float base = min(max(inner, wy), 0.0) + length(max(vec2(inner, wy), 0.0)) - r;
+  float zr = p.z - L_AZ, yr = p.y - L_AY;
+  float s = zr * uLidCS.x + yr * uLidCS.y, t = -zr * uLidCS.y + yr * uLidCS.x;
+  float li = sdRRect(vec2(p.x, s - (L_LL * 0.5 - L_HE)), vec2(L_W, L_LL) * 0.5, L_RP) + L_RL;
+  float wt = abs(t - (L_HT0 + L_TL * 0.5)) - (L_TL * 0.5 - L_RL);
+  float lid = min(max(li, wt), 0.0) + length(max(vec2(li, wt), 0.0)) - L_RL;
+  return min(base, lid);
+}
+
 // Floor, quarter cylinder and wall, nearest hit wins. No branching on the ray,
 // so it stays one straight path per pixel.
 float sweepHit(vec3 ro, vec3 rd, out vec3 p, out vec3 n) {
-  float cy = uGround + SWEEP_R;
-  float cz = -SWEEP_Z;
+  // Scaled with the device: a 356mm laptop leaning back reaches ~210mm behind
+  // its centre, past the phone-sized floor and into the curve.
+  float SZ = SWEEP_Z * uSweepScale, SR = SWEEP_R * uSweepScale;
+  float cy = uGround + SR;
+  float cz = -SZ;
 
   float dy = abs(rd.y) < 1e-9 ? 1e-9 : rd.y;
   float tFloor = (uGround - ro.y) / dy;
-  if (tFloor <= 0.0 || ro.z + tFloor * rd.z < -SWEEP_Z) tFloor = BIG;
+  if (tFloor <= 0.0 || ro.z + tFloor * rd.z < -SZ) tFloor = BIG;
 
   float dz = abs(rd.z) < 1e-9 ? 1e-9 : rd.z;
-  float tWall = (-(SWEEP_Z + SWEEP_R) - ro.z) / dz;
+  float tWall = (-(SZ + SR) - ro.z) / dz;
   if (tWall <= 0.0 || ro.y + tWall * rd.y < cy) tWall = BIG;
 
   float oy = ro.y - cy, oz = ro.z - cz;
   float a = max(rd.y * rd.y + rd.z * rd.z, 1e-12);
   float b = 2.0 * (oy * rd.y + oz * rd.z);
-  float c = oy * oy + oz * oz - SWEEP_R * SWEEP_R;
+  float c = oy * oy + oz * oz - SR * SR;
   float disc = b * b - 4.0 * a * c;
   // The camera sits inside the cylinder, so the forward root is the far one.
   float tCurve = (-b + sqrt(max(disc, 0.0))) / (2.0 * a);
   float qy = ro.y + tCurve * rd.y;
   float qz = ro.z + tCurve * rd.z;
-  if (disc <= 0.0 || tCurve <= 0.0 || qy < uGround || qy > cy || qz > -SWEEP_Z) tCurve = BIG;
+  if (disc <= 0.0 || tCurve <= 0.0 || qy < uGround || qy > cy || qz > -SZ) tCurve = BIG;
 
   float t = min(min(tFloor, tWall), tCurve);
   p = ro + rd * t;
@@ -1479,13 +1935,18 @@ float marchBody(vec3 ro, vec3 rd, float t0, float pxK, out float tHit) {
   float t = 0.0;
   float bestR = 1e9;
   tHit = 0.0;
-  for (int i = 0; i < 40; i++) {
-    float d = sdPrism(ro + rd * t, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+  // Constant bound for GLSL ES, real cap from uReflSteps: the phone keeps its 40,
+  // the laptop's thin lid needs more steps over a longer reflected path.
+  for (int i = 0; i < 80; i++) {
+    if (float(i) >= uReflSteps) break;
+    vec3 q = ro + rd * t;
+    float d = uDevice > 0.5 ? sdLaptop(q)
+                            : sdPrism(q, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
     float r = d / (pxK * (t0 + t));
     if (r < bestR) { bestR = r; tHit = t; }
     if (d < 0.05) { tHit = t; return 1.0; }
     t += max(d, 0.05) * 0.9;
-    if (t > REFL_LEN) break;
+    if (t > REFL_LEN * uSweepScale) break;
   }
   return clamp(0.5 - bestR, 0.0, 1.0);
 }
@@ -1509,8 +1970,9 @@ void main() {
   // A light pool on the floor. Without it the floor's normal never changes, the
   // colour is flat across the whole plane, and it reads as paper rather than a
   // lit surface.
-  float r2 = (p.x * p.x + (p.z - POOL_Z) * (p.z - POOL_Z))
-             / (2.0 * POOL_SIGMA * POOL_SIGMA);
+  float PZ = POOL_Z * uSweepScale, PS = POOL_SIGMA * uSweepScale;
+  float r2 = (p.x * p.x + (p.z - PZ) * (p.z - PZ))
+             / (2.0 * PS * PS);
   // Interpolated toward 1.0 rather than scaling the 0.85 term, because the pool
   // both lifts the centre and drops the periphery: scaling it would collapse to
   // col *= 0.62 at zero and read as the lights going out, not as no highlight.
@@ -1524,9 +1986,9 @@ void main() {
   // carries onto the curve for free.
   if (uReflect > 0.001 && valid > 0.5) {
     float th;
-    float cov = marchBody(uRotT * p, uRotT * reflect(rd, n), t, 2.0 * uTanHalf / uRes.y, th);
+    float cov = marchBody(uCenter + uRotT * p, uRotT * reflect(rd, n), t, 2.0 * uTanHalf / uRes.y, th);
     if (cov > 0.0) {
-      float fade = clamp(1.0 - th / REFL_LEN, 0.0, 1.0);
+      float fade = clamp(1.0 - th / (REFL_LEN * uSweepScale), 0.0, 1.0);
       float lum = clamp(dot(uFinish, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
       outc *= 1.0 - cov * fade * fade * uReflect * (1.0 - lum);
     }
@@ -1541,7 +2003,7 @@ void main() {
 
 const glCanvas = document.createElement('canvas');
 const gl = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true, antialias: false });
-let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, screenProgram = null, texture = null, hasTexture = false;
+let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, screenProgram = null, laptopProgram = null, texture = null, hasTexture = false;
 
 function buildProgram(fragSrc) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
@@ -1564,6 +2026,7 @@ function initGL() {
   program = buildProgram(FRAG);
   assetProgram = buildProgram(ASSET_FRAG);
   studioProgram = buildProgram(STUDIO_FRAG);
+  laptopProgram = buildProgram(LAPTOP_FRAG);
   backdropProgram = buildProgram(BACKDROP_FRAG);
   screenProgram = buildProgram(SCREEN_FRAG);
   const buf = gl.createBuffer();
@@ -1760,7 +2223,10 @@ async function loadBuiltIn() {
 function render(canvas, W, H) {
   // Photo is a view inside Studio: the phone body only ever comes from
   // renderStudio, and the photo view only ever from renderPhoto.
-  if (state.mode === 'studio') return photoShown() ? renderPhoto(canvas, W, H) : renderStudio(canvas, W, H);
+  if (state.mode === 'studio') {
+    if (photoShown()) return renderPhoto(canvas, W, H);
+    return laptopShown() ? renderLaptop(canvas, W, H) : renderStudio(canvas, W, H);
+  }
   if (state.mode === 'screen') return renderScreen(canvas, W, H);
   if (state.mode === 'asset' && BUNDLES[state.bundle]) return renderAsset(canvas, W, H);
   return renderGenerated(canvas, W, H);
@@ -1776,6 +2242,51 @@ const FIT_MODES = { stretch: 0, fill: 1, fit: 2 };
 // Studio display half-extents in millimetres, matching the shader's
 // `sw = W * 0.5 - BEZEL` for W = 71.5, H = 146.7, BEZEL = 2.4.
 const STUDIO_SW = 71.5 / 2 - 2.4, STUDIO_SH = 146.7 / 2 - 2.4;
+
+// The Studio laptop, millimetres. The same numbers as LAPTOP_FRAG's constants
+// (and BACKDROP_FRAG's L_ copies) — change one set and the others must follow.
+const LAPTOP = { W: 355.7, D: 248.1, Tb: 11.95, Tl: 3.3, gap: 0.3, Ll: 245.0, Rp: 10.5,
+                 e: 3.65, t0: 3.65, DW: 345.6, DH: 223.4, topBez: 5.5 };
+LAPTOP.Az = -LAPTOP.D / 2 + LAPTOP.e;
+LAPTOP.Ay = LAPTOP.gap - LAPTOP.e;
+LAPTOP.sDisp = LAPTOP.Ll - LAPTOP.e - LAPTOP.topBez - LAPTOP.DH / 2;
+// Bounding radius of the Studio phone, the reference the laptop's camera scales from.
+const PHONE_RADIUS = Math.hypot(Math.hypot(71.5 / 2, 146.7 / 2), 7.65 / 2);
+
+// A point in the lid's frame (x, along the lid from the axis, across it) into
+// base-anchored object space, at the given lid angle in degrees.
+function laptopLidPoint(x, s, t, lidDeg) {
+  const a = lidDeg * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a);
+  return { x, y: LAPTOP.Ay + s * sn + t * c, z: LAPTOP.Az + s * c - t * sn };
+}
+
+// Centre and radius of the assembled laptop's bounding box at a lid angle. The
+// centre is the rotation pivot, so opening the lid keeps the machine centred in
+// frame instead of swinging it off to one side.
+function laptopFrame(lidDeg) {
+  const L = LAPTOP, pts = [];
+  for (const x of [-L.W / 2, L.W / 2]) {
+    for (const y of [0, -L.Tb]) for (const z of [-L.D / 2, L.D / 2]) pts.push({ x, y, z });
+    for (const s of [-L.e, L.Ll - L.e]) for (const t of [L.t0, L.t0 + L.Tl]) pts.push(laptopLidPoint(x, s, t, lidDeg));
+  }
+  const lo = { x: Infinity, y: Infinity, z: Infinity }, hi = { x: -Infinity, y: -Infinity, z: -Infinity };
+  for (const p of pts) for (const k of ['x', 'y', 'z']) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+  const center = { x: (lo.x + hi.x) / 2, y: (lo.y + hi.y) / 2, z: (lo.z + hi.z) / 2 };
+  let radius = 0;
+  for (const p of pts) radius = Math.max(radius, Math.hypot(p.x - center.x, p.y - center.y, p.z - center.z));
+  return { center, radius };
+}
+
+// Silhouette points of each part separately, so each casts its own shadow hull —
+// one hull round an open laptop would fill in the gap under a side light.
+function laptopOutlines(lidDeg, steps) {
+  const L = LAPTOP;
+  const plan = roundedOutline(L.W, L.D, L.Rp, steps), lidPlan = roundedOutline(L.W, L.Ll, L.Rp, steps);
+  const base = [], lid = [];
+  for (const y of [0, -L.Tb]) plan.forEach(o => base.push({ x: o.x, y, z: o.y }));
+  for (const t of [L.t0, L.t0 + L.Tl]) lidPlan.forEach(o => lid.push(laptopLidPoint(o.x, o.y + L.Ll / 2 - L.e, t, lidDeg)));
+  return { base, lid };
+}
 // Mirrors SCREEN_R in STUDIO_FRAG. Screen mode passes it as a uniform so the
 // corner shape can be chosen; the other modes keep it as a shader constant.
 const STUDIO_SCREEN_R = 9.6;
@@ -1809,7 +2320,7 @@ function screenHalfExtents() {
 // and k is the per-axis factor from the fit branch. Requiring t within [0,1] for
 // every uv in [0,1] collapses to |pan| <= 0.5/k - 0.5/zm, per axis.
 //
-// This mirrors fitUV in all four shaders. Change one and this has to follow.
+// This mirrors fitUV in all five shaders. Change one and this has to follow.
 function imgPanRange(sa, ia, mode, zm) {
   let kx = 1, ky = 1;
   if (mode > 0.5 && mode < 1.5) {           // fill
@@ -1851,11 +2362,30 @@ const FINISHES = {
   Gold: [0.80, 0.68, 0.47]
 };
 
+// The laptop's own list, Apple's two MacBook Pro finishes. Separate from FINISHES
+// so the phone's chips don't change, and because the phone's Silver is bluish where
+// the MacBook's is neutral. apple.com gives names only, so these are calibrated on
+// references/macbook-side.png, where a Space Black and a Silver machine share one
+// light: side-wall tint within 1-2% (photo R/G 1.00, B/G 1.02 for both).
+// KNOWN LIMITATION, for a later material-model change (no workaround here): in the
+// photo Silver is 4.8x brighter than Space Black, but the coat model reaches only
+// about 2.2x even at these extreme values (the phone's Silver/Midnight is 1.6-1.8x),
+// and grazing reflection dominates flat faces, so a Space Black deck renders
+// mid-grey where the photo's is black.
+const LAPTOP_FINISHES = {
+  'Space Black': [0.040, 0.040, 0.043],
+  Silver: [0.864, 0.852, 0.918]
+};
+const LAPTOP_FINISH_TILES = { 'Space Black': '#2E2F33', Silver: '#D6D7DA' };
+
 // Draws the Studio Sweep backdrop straight onto the 2D context. Runs after the
 // device pass has already been copied out to its own layer, so clobbering
 // glCanvas here is safe -- and deliberately does not touch deviceBounds, which
 // has to keep meaning "the phone" for Trim.
-function paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundY) {
+// dev is optional and only the laptop passes it; without it the phone's uniforms
+// are the neutral values BACKDROP_FRAG documents (device 0, scale 1, centre 0,
+// 40 reflection steps), so the phone's sweep is unchanged.
+function paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundY, dev) {
   if (!gl || !backdropProgram) return;
   glCanvas.width = W; glCanvas.height = H;
   gl.viewport(0, 0, W, H);
@@ -1874,13 +2404,20 @@ function paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundY) {
   gl.uniform1f(u('uGround'), groundY);
   const tint = hexToRgb(state.bg);
   gl.uniform3f(u('uTint'), tint[0], tint[1], tint[2]);
-  const fin = FINISHES[state.finish] || FINISHES.Silver;
+  const fin = (dev && dev.finish) || FINISHES[state.finish] || FINISHES.Silver;
   gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
   gl.uniform1f(u('uReflect'), (state.reflect != null ? state.reflect : 55) / 100);
   const pool = state.highlight === false
     ? 0
     : (state.highlightStrength != null ? state.highlightStrength : 100) / 100;
   gl.uniform1f(u('uPool'), pool);
+  const lap = !!(dev && dev.laptop);
+  gl.uniform1f(u('uDevice'), lap ? 1 : 0);
+  gl.uniform1f(u('uSweepScale'), lap ? dev.scale : 1);
+  gl.uniform1f(u('uReflSteps'), lap ? 80 : 40);
+  gl.uniform3f(u('uCenter'), lap ? dev.center.x : 0, lap ? dev.center.y : 0, lap ? dev.center.z : 0);
+  const la = (lap ? dev.lid : 0) * Math.PI / 180;
+  gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   ctx.drawImage(glCanvas, 0, 0);
 }
@@ -1966,6 +2503,99 @@ function renderStudio(canvas, W, H) {
     const cast = castToGround(world);
     const hull = convexHull(cast.map(toPx));
     paintShadow(ctx, hull, W, H, 1.0);
+  }
+  ctx.drawImage(scratch, 0, 0);
+}
+
+// The laptop counterpart of renderStudio: same pipeline and the same camera model,
+// with the framing, design quad, shadow and sweep taken from the hinged body.
+function renderLaptop(canvas, W, H) {
+  const ctx = canvas.getContext('2d');
+  canvas.width = W; canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+  if (!state.transparent) { ctx.fillStyle = state.bg; ctx.fillRect(0, 0, W, H); }
+  if (!gl || !laptopProgram) return;
+
+  const lid = state.lid != null ? state.lid : 110;
+  const { center, radius } = laptopFrame(lid);
+  const R = rotationMatrix(state.rx, state.ry, state.rz);
+  const Rt = [R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]];
+  // Camera distance scaled with the device, so a Perspective setting gives the
+  // laptop the same amount of perspective it gives the phone. Left at the phone's
+  // millimetres, full perspective would put the camera inside the laptop.
+  const camZ = (1400 - (state.persp / 100) * 1080) * radius / PHONE_RADIUS;
+  const half = Math.asin(Math.min(radius / camZ, 0.99));
+  const tanHalf = Math.tan(half / (state.zoom / 100));
+
+  glCanvas.width = W; glCanvas.height = H;
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(laptopProgram);
+  gl.disable(gl.BLEND);
+  const u = n => gl.getUniformLocation(laptopProgram, n);
+  const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
+  gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
+  gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
+  gl.uniform2f(u('uRes'), W, H);
+  gl.uniform1f(u('uCamZ'), camZ);
+  gl.uniform1f(u('uTanHalf'), tanHalf);
+  gl.uniform1f(u('uAspect'), W / H);
+  gl.uniform1f(u('uRadius'), radius);
+  gl.uniform3f(u('uCenter'), center.x, center.y, center.z);
+  const la = lid * Math.PI / 180;
+  gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
+  const fin = LAPTOP_FINISHES[state.laptopFinish] || LAPTOP_FINISHES['Space Black'];
+  gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+  gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
+  gl.uniform1f(u('uSrcAspect'), srcAspect);
+  gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
+  setImgUniforms(u, LAPTOP.DH / LAPTOP.DW);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform1i(u('uTex'), 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const scratch = document.createElement('canvas');
+  scratch.width = W; scratch.height = H;
+  scratch.getContext('2d').drawImage(glCanvas, 0, 0);
+  deviceBounds = boundsFromLayer(scratch, W, H);
+
+  // World is the object rotated about the pivot, matching the shader's
+  // ro = uCenter + uRotT * camera.
+  const rel = p => applyR(R, { x: p.x - center.x, y: p.y - center.y, z: p.z - center.z });
+  const toPx = (q) => {
+    const d = Math.max(camZ - q.z, 1e-3);
+    const nx = q.x / (d * tanHalf * (W / H));
+    const ny = q.y / (d * tanHalf);
+    return { x: (nx + 1) * 0.5 * W, y: (1 - ny) * 0.5 * H };
+  };
+
+  // The display on the lid's inner face, corners in uv order, so dragging the
+  // design works here exactly as it does on the phone.
+  if (wantQuad) {
+    const L = LAPTOP;
+    screenQuad = [[-L.DW / 2, L.DH / 2], [L.DW / 2, L.DH / 2], [L.DW / 2, -L.DH / 2], [-L.DW / 2, -L.DH / 2]]
+      .map(([x, y]) => toPx(rel(laptopLidPoint(x, L.sDisp + y, L.t0, lid))));
+  }
+
+  const parts = laptopOutlines(lid, 10);
+  const base = parts.base.map(rel), lidPts = parts.lid.map(rel);
+  const world = base.concat(lidPts);
+
+  if (state.bgMode === 'sweep' && !state.transparent) {
+    paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundPlaneY(world),
+               { laptop: true, scale: radius / PHONE_RADIUS, center, lid, finish: fin });
+  }
+
+  if (state.shadow) {
+    // One cast of both parts, so they land on the same ground plane, then split:
+    // a hull per part, joined in one fill, with the contact core under the base
+    // only — the lid never touches the floor.
+    const cast = castToGround(world);
+    const hullBase = convexHull(cast.slice(0, base.length).map(toPx));
+    const hullLid = convexHull(cast.slice(base.length).map(toPx));
+    paintShadow(ctx, hullBase, W, H, 1.0, [hullLid]);
   }
   ctx.drawImage(scratch, 0, 0);
 }
@@ -2384,6 +3014,14 @@ state.highlightStrength = 100;
 // Where the design sits inside the display. Part of the output, so it rides
 // along in the saved settings — unlike the preview viewport below.
 state.imgX = 0; state.imgY = 0; state.imgZoom = 100;
+// Studio's device. 'phone' must stay the default, so every mockup saved before
+// the laptop existed reopens as the phone it was.
+state.studioDevice = 'phone';
+// Laptop hinge, degrees between lid and base: 0 closed, 90 upright.
+state.lid = 110;
+// The laptop's finish, kept apart from state.finish so switching device leaves the
+// phone's finish as it was.
+state.laptopFinish = 'Space Black';
 
 const preview = document.getElementById('preview');
 const statusText = document.getElementById('statustext');
@@ -2516,7 +3154,10 @@ function convexHull(pts) {
 // Broad cast plus a tighter, darker, less blurred core where the device meets
 // the ground. The contact darkening is most of what sells it as resting on
 // something rather than floating.
-function paintShadow(ctx, hull, W, H, strength) {
+// extra: optional further hulls for the broad pass only (the laptop's lid). They
+// join the same path as hull, so where they overlap it the shadow is one fill,
+// not two stacked ones; the contact core stays hull's alone.
+function paintShadow(ctx, hull, W, H, strength, extra) {
   if (!hull || hull.length < 3) return;
   const opacity = (state.shadowOpacity != null ? state.shadowOpacity : 34) / 100 * strength;
   const soft = (state.shadowSoft != null ? state.shadowSoft : 50) / 100;
@@ -2530,7 +3171,13 @@ function paintShadow(ctx, hull, W, H, strength) {
   ctx.save();
   ctx.filter = 'blur(' + Math.max(2, H * 0.006 + H * 0.030 * soft) + 'px)';
   ctx.fillStyle = 'rgba(0,0,0,' + opacity.toFixed(3) + ')';
-  path(hull); ctx.fill();
+  path(hull);
+  (extra || []).forEach(pts => {
+    if (!pts || pts.length < 3) return;
+    pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+    ctx.closePath();
+  });
+  ctx.fill();
   ctx.restore();
 
   let cx = 0, cy = 0;
@@ -2577,7 +3224,7 @@ let photoPlacement = null;     // photo -> canvas mapping used by the preview
 // anything, so a missing one always falls back to the phone.
 let photoView = false;
 function photoShown() {
-  return state.mode === 'studio' && photoView && !!photoBitmap;
+  return state.mode === 'studio' && state.studioDevice !== 'laptop' && photoView && !!photoBitmap;
 }
 
 // Display proportions of the Studio phone, which is what the angle is applied
@@ -2892,7 +3539,10 @@ function buildChips(id, keys, onPick, active, withTile) {
     if (withTile) {
       const t = document.createElement('span');
       t.className = 'tile';
-      t.style.background = TILES[k] || FINISH_TILES[k] || FINISH_SWATCH[k] || '#C4C4C9';
+      // withTile may be a map of its own, for a list whose names clash with another's
+      // (the laptop's Silver is not the phone's).
+      t.style.background = (typeof withTile === 'object' && withTile[k]) ||
+        TILES[k] || FINISH_TILES[k] || FINISH_SWATCH[k] || '#C4C4C9';
       b.appendChild(t);
     }
     b.appendChild(document.createTextNode(k));
@@ -2923,17 +3573,69 @@ const CUSTOM = 'Custom';
 // Not on `state`: whether the fine-tune sliders are open is a property of
 // looking, not of the output.
 let angleAdjust = false;
-function isPreset(k) { return Object.prototype.hasOwnProperty.call(PRESETS, k); }
+// The laptop only exists in Studio; Screen and the other modes keep the phone.
+function laptopShown() { return state.mode === 'studio' && state.studioDevice === 'laptop'; }
+// The preset table for whatever is on screen, so the phone's lookups resolve
+// exactly as before and the laptop gets its own angles.
+function activePresets() { return laptopShown() ? LAPTOP_PRESETS : PRESETS; }
+function isPreset(k) { return Object.prototype.hasOwnProperty.call(activePresets(), k); }
 
 // Grouping for the gallery. Any preset not listed here lands under More, so
 // swapping PRESETS for team-agreed values still shows every one of them.
 const ANGLE_GROUPS = [['Upright', ['Flat', 'Turn left', 'Turn right']],
                       ['Laid back', ['Laid left', 'Laid right', 'Steep']]];
+const LAPTOP_ANGLE_GROUPS = [['Open', ['Front', 'Hero front', 'Three-quarter left', 'Three-quarter right', 'From above', 'Side']],
+                             ['Closed', ['Closed']]];
 
 // A grey slab at the given angle, projected with Studio's camera so the icon
 // leans the same way the render does. Depth is doubled: at 48px a true 7.65mm
 // edge is under a pixel and every angle reads as a flat card.
+// The laptop's thumb: base and lid as boxes, faces painted far to near. Thicknesses
+// tripled for the same reason the phone's depth is doubled — at icon size a
+// 12mm base is a pixel. Perspective is loosened too; this is an icon, not a render.
+function drawLaptopThumb(canvas, a) {
+  const S = canvas.width, ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  const L = LAPTOP, lid = a.lid != null ? a.lid : 110, tb = L.Tb * 3, tl = L.Tl * 3;
+  const { center } = laptopFrame(lid);
+  const R = rotationMatrix(a.rx, a.ry, a.rz);
+  const camZ = (1400 - (a.persp / 100) * 1080) * 4;
+  const P = p => {
+    const q = applyR(R, { x: p.x - center.x, y: p.y - center.y, z: p.z - center.z });
+    const d = Math.max(camZ - q.z, 20);
+    return { x: q.x / d, y: -q.y / d, z: q.z };
+  };
+  const bx = (x, y, z) => P({ x, y, z });
+  const lp = (x, s, t) => P(laptopLidPoint(x, s, t, lid));
+  const hw = L.W / 2, hd = L.D / 2, s0 = -L.e, s1 = L.Ll - L.e, t0 = L.t0, t1 = L.t0 + tl;
+  const faces = [
+    [[bx(-hw, 0, -hd), bx(hw, 0, -hd), bx(hw, 0, hd), bx(-hw, 0, hd)], '#D1D1D6'],
+    [[bx(-hw, -tb, -hd), bx(hw, -tb, -hd), bx(hw, -tb, hd), bx(-hw, -tb, hd)], '#5A5A5F'],
+    [[bx(-hw, 0, hd), bx(hw, 0, hd), bx(hw, -tb, hd), bx(-hw, -tb, hd)], '#8E8E93'],
+    [[bx(-hw, 0, -hd), bx(hw, 0, -hd), bx(hw, -tb, -hd), bx(-hw, -tb, -hd)], '#8E8E93'],
+    [[bx(-hw, 0, -hd), bx(-hw, 0, hd), bx(-hw, -tb, hd), bx(-hw, -tb, -hd)], '#8E8E93'],
+    [[bx(hw, 0, -hd), bx(hw, 0, hd), bx(hw, -tb, hd), bx(hw, -tb, -hd)], '#8E8E93'],
+    [[lp(-hw, s0, t0), lp(hw, s0, t0), lp(hw, s1, t0), lp(-hw, s1, t0)], '#AEAEB2'],
+    [[lp(-hw, s0, t1), lp(hw, s0, t1), lp(hw, s1, t1), lp(-hw, s1, t1)], '#D1D1D6'],
+    [[lp(-hw, s1, t0), lp(hw, s1, t0), lp(hw, s1, t1), lp(-hw, s1, t1)], '#8E8E93']
+  ].map(([pts, fill]) => ({ pts, fill, z: pts.reduce((m, p) => m + p.z, 0) / pts.length }));
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  faces.forEach(f => f.pts.forEach(p => {
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  }));
+  const k = S * 0.86 / Math.max(x1 - x0, y1 - y0);
+  faces.sort((f, g) => f.z - g.z).forEach(f => {
+    ctx.beginPath();
+    f.pts.forEach((p, i) => {
+      const x = S / 2 + (p.x - (x0 + x1) / 2) * k, y = S / 2 + (p.y - (y0 + y1) / 2) * k;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.closePath(); ctx.fillStyle = f.fill; ctx.fill();
+  });
+}
+
 function drawAngleThumb(canvas, a) {
+  if (laptopShown()) return drawLaptopThumb(canvas, a);
   const S = canvas.width, ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, S, S);
   const R = rotationMatrix(a.rx, a.ry, a.rz);
@@ -2973,7 +3675,7 @@ function drawAngleThumb(canvas, a) {
 function pickAngle(k) {
   state.preset = k;
   // Custom keeps the angle already showing, so it starts from the last preset.
-  if (isPreset(k)) Object.assign(state, PRESETS[k]);
+  if (isPreset(k)) Object.assign(state, activePresets()[k]);
   setAngleMenu(false);
   syncSliders();
   refreshPresetChips();
@@ -2985,12 +3687,12 @@ function buildAngleMenu() {
   el.innerHTML = '';
   const listed = new Set();
   const groups = [['Custom', [CUSTOM]]];
-  ANGLE_GROUPS.forEach(([name, keys]) => {
+  (laptopShown() ? LAPTOP_ANGLE_GROUPS : ANGLE_GROUPS).forEach(([name, keys]) => {
     const ks = keys.filter(isPreset);
     ks.forEach(k => listed.add(k));
     if (ks.length) groups.push([name, ks]);
   });
-  const rest = Object.keys(PRESETS).filter(k => !listed.has(k));
+  const rest = Object.keys(activePresets()).filter(k => !listed.has(k));
   if (rest.length) groups.push(['More', rest]);
   const active = isPreset(state.preset) ? state.preset : CUSTOM;
   groups.forEach(([name, keys]) => {
@@ -3004,7 +3706,7 @@ function buildAngleMenu() {
       const c = document.createElement('canvas');
       c.width = c.height = 96;
       // The Custom tile shows wherever the dials currently are.
-      drawAngleThumb(c, k === CUSTOM ? state : PRESETS[k]);
+      drawAngleThumb(c, k === CUSTOM ? state : activePresets()[k]);
       b.appendChild(c);
       b.appendChild(document.createTextNode(k === CUSTOM ? 'Custom' : k));
       b.onclick = () => pickAngle(k);
@@ -3045,6 +3747,9 @@ function applyAngleUI() {
   document.getElementById('adjustrot').style.display = (preset && angleAdjust) ? 'block' : 'none';
   // Perspective has no dial, so Custom keeps its slider showing.
   document.getElementById('persprow').style.display = (!preset || angleAdjust) ? 'flex' : 'none';
+  // The hinge is its own control, apart from the whole-object rotation, and it
+  // shows whether or not a preset is active: opening the lid is not a camera move.
+  document.getElementById('lidrow').style.display = laptopShown() ? 'flex' : 'none';
 }
 
 // The needle angle is the value itself, clockwise from twelve o'clock, like
@@ -3147,6 +3852,11 @@ function refreshDeviceChips() {
 // Reads FINISHES and state.finish only — nothing from the asset bundles — so it
 // belongs out here with the other chip builders rather than inside loadBuiltIn.
 function refreshFinishChips() {
+  if (laptopShown()) {
+    buildChips('finishes', Object.keys(LAPTOP_FINISHES), k => { state.laptopFinish = k; },
+               state.laptopFinish, LAPTOP_FINISH_TILES);
+    return;
+  }
   buildChips('finishes', Object.keys(FINISHES), k => { state.finish = k; },
              state.finish, true);
 }
@@ -3236,7 +3946,12 @@ function applyMode() {
   // stay: a bare display is still a 3D object being framed and aligned.
   const screen = state.mode === 'screen';
   document.getElementById('studiobox').style.display = (studio && !photo) ? 'block' : 'none';
-  document.getElementById('photobox').style.display = studio ? 'block' : 'none';
+  // Photo matching fits a phone; the laptop version needs its own design (a
+  // traced lid gives the whole-object rotation combined with the hinge), so it
+  // is not offered on the laptop yet. Same for matching a photoreal phone angle.
+  const laptop = laptopShown();
+  document.getElementById('photobox').style.display = (studio && !laptop) ? 'block' : 'none';
+  document.getElementById('matchbtn').style.display = laptop ? 'none' : '';
   // The toggle only means anything once there is a photo to toggle to.
   document.getElementById('photoview').style.display = photoBitmap ? '' : 'none';
   buildSeg('photoview', PHOTO_VIEWS, v => setPhotoView(v === 'photo'), photo ? 'photo' : 'phone');
@@ -3257,10 +3972,32 @@ function applyMode() {
     (!screen && !photo && state.shadow) ? 'block' : 'none';
   applyBgMode();
   applyScreenShape();
+  // Switching mode can switch preset tables (the laptop is Studio-only), so the
+  // angle picker, its thumb and the lid row are refreshed with the panel. The
+  // finish chips likewise: each device has its own list.
+  refreshPresetChips();
+  refreshFinishChips();
   draw();
 }
 
+const STUDIO_DEVICES = [['iPhone', 'phone'], ['MacBook Pro 16″', 'laptop']];
+function setStudioDevice(v) {
+  if (state.studioDevice === v) return;
+  state.studioDevice = v;
+  // Each device has its own preset table, so start it on its default view rather
+  // than carrying phone angles onto the laptop, or laptop angles back.
+  const first = v === 'laptop' ? 'Three-quarter left' : 'Turn left';
+  state.preset = first;
+  Object.assign(state, activePresets()[first]);
+  // The photo view is phone-only for now.
+  if (v === 'laptop') photoView = false;
+  resetView();
+  syncSliders();
+  applyMode();
+}
+
 buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
+buildSeg('studiodevice', STUDIO_DEVICES, setStudioDevice, state.studioDevice);
 applyLayout(false);
 
 function bundleParts() {
@@ -3338,7 +4075,7 @@ document.getElementById('files').addEventListener('change', async (e) => {
 });
 
 // Values borrow Fuse's trailing-digit treatment: the number is solid, the unit fades.
-const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%'],['screenRadius','screenRadiuso','%']];
+const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%'],['screenRadius','screenRadiuso','%'],['lid','lido','°']];
 function setVal(outId, v, unit) {
   document.getElementById(outId).innerHTML = '<b>' + v + '</b><i>' + unit + '</i>';
 }
@@ -3819,6 +4556,15 @@ onmessage = async (event) => {
       // unguarded — a mockup saved before the slider existed would otherwise
       // set the range to undefined and print "undefined%" in the readout.
       if (state.screenRadius === undefined) state.screenRadius = 0;
+      // Mockups saved before the laptop existed carry neither key. Tested on the
+      // saved settings, not on state: Object.assign leaves a key the settings lack
+      // at whatever this session had, so after switching to the laptop an old phone
+      // mockup would otherwise reopen as a laptop. Both must precede syncSliders
+      // (state.lid feeds a range input unguarded) and applyMode (studioDevice
+      // picks the renderer and the preset table).
+      if (msg.settings.studioDevice === undefined) state.studioDevice = 'phone';
+      if (msg.settings.lid === undefined) state.lid = 110;
+      if (msg.settings.laptopFinish === undefined) state.laptopFinish = 'Space Black';
       // Photo stopped being a mode and became a view inside Studio. Old photo
       // mockups never stored the photo itself, so they reopen on the phone.
       if (state.mode === 'photo') state.mode = 'studio';
@@ -3831,6 +4577,7 @@ onmessage = async (event) => {
       buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
       buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
       buildSeg('screenshape', SCREEN_SHAPES, v => { state.screenShape = v; applyScreenShape(); draw(); }, state.screenShape);
+      buildSeg('studiodevice', STUDIO_DEVICES, setStudioDevice, state.studioDevice);
       refreshAssetChips();
       applyMode();
       ['body', 'bg'].forEach(id => document.getElementById(id).value = state[id]);
@@ -3892,10 +4639,19 @@ const EXPORT_BASE_H = 1080;
 // The previous clamp bounded H, which is the short axis for every landscape
 // aspect, so it never fired for any value in SCALES and 4x/16:9 went out at
 // 6400px wide and threw. Bound the axis that is actually constrained instead.
+// The 1080 base makes a phone's display land at roughly its design's own size on
+// the canvas (0.88x a 390-wide frame). The same frame put a laptop display at a
+// third of a 1440-wide desktop frame, with each output pixel averaging 2.6-6 design
+// pixels. Three times the base puts the Three-quarter display at ~1410 units, close
+// to a desktop frame, at 1x. Higher scales and wide ratios hit the 4096 cap below,
+// which already reports the reduced multiplier; code.js sizes the rectangle from the
+// returned scale, so the Figma size stays at the laptop base either way.
+const LAPTOP_EXPORT_MULT = 3;
 function exportSize(scale, aspect) {
+  const base = laptopShown() ? EXPORT_BASE_H * LAPTOP_EXPORT_MULT : EXPORT_BASE_H;
   const maxH = Math.floor(MAX_EXPORT_PX / Math.max(1, aspect));
-  const H = Math.min(EXPORT_BASE_H * scale, maxH, MAX_EXPORT_PX);
-  return { W: Math.round(H * aspect), H, scale: H / EXPORT_BASE_H };
+  const H = Math.min(base * scale, maxH, MAX_EXPORT_PX);
+  return { W: Math.round(H * aspect), H, scale: H / base };
 }
 
 goBtn.addEventListener('click', () => {
