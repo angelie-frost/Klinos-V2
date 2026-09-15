@@ -120,6 +120,15 @@
   .pill b { color: var(--ink); font-weight: 600; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
   .dot.idle { background: var(--ink-3); }
+  /* Photo fit read from a corner past the photo edge. */
+  .dot.warn { background: #FF9F0A; }
+  /* The mirror-pose suggestion: a quiet inline option, not a call to action. */
+  .pill .alt {
+    font: inherit; font-size: 11.5px; font-weight: 600; color: var(--ink);
+    background: var(--sunk); border: 1px solid var(--line); border-radius: 999px;
+    padding: 1px 9px; margin-left: 6px; cursor: pointer; white-space: nowrap;
+  }
+  .pill .alt:hover { background: var(--line); }
 
   .banner {
     display: none;
@@ -2583,7 +2592,10 @@ function seedQuad(w, h) {
 // Recovers camera angles from four corners by fitting a projected rectangle to
 // them, up to scale and position. Same method used offline to calibrate the
 // photoreal renders, where it landed within 0.1%.
-function fitPose(quad, aspect) {
+//
+// seed, when given, skips the grid and refines from that pose instead. That is
+// how mirrorPose explores the other basin with exactly the same refinement.
+function fitPose(quad, aspect, seed) {
   const RECT = [[-0.5, aspect / 2], [0.5, aspect / 2], [0.5, -aspect / 2], [-0.5, -aspect / 2]];
   function resid(rx, ry, rz, camZ) {
     const R = rotationMatrix(rx, ry, rz);
@@ -2610,7 +2622,8 @@ function fitPose(quad, aspect) {
   }
 
   let best = { e: Infinity, rx: 0, ry: 0, rz: 0, cz: 40 };
-  for (let rx = -60; rx <= 60; rx += 15)
+  if (seed) best = Object.assign({}, seed, { e: resid(seed.rx, seed.ry, seed.rz, seed.cz) });
+  else for (let rx = -60; rx <= 60; rx += 15)
     for (let ry = -60; ry <= 60; ry += 15)
       for (let rz = -60; rz <= 60; rz += 20)
         for (const cz of [4, 10, 40, 400]) {
@@ -2637,6 +2650,62 @@ function fitPose(quad, aspect) {
   return cur;
 }
 
+// A traced corner this far outside the photo cannot be where the screen really
+// ends, so the fit is working from a guess. Measured in millimetres of phone, scaled
+// by the quad's own width at that end, so it means the same at any photo size.
+// Why 4 and not 0: the handles mark the sharp corners of a rounded display, which
+// poke out past the rounded body, so a valid photo cropped tight to the phone
+// already puts them up to ~3mm past the frame (synthetic sweep, 1% handle noise:
+// 0.0% false warnings at 4mm). What this cannot catch is a cut-off corner dropped
+// exactly on the photo edge, which looks identical to such a tight crop.
+const PHOTO_EDGE_MM = 4;
+const CORNER_NAMES = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+
+// Indices of the corners past the edge. iw/ih are the photo's own pixel bounds,
+// the space photoQuad lives in, rather than deviceBounds, which whichever render
+// path ran last overwrites.
+function cornersPastEdge(quad, iw, ih) {
+  const wTop = Math.hypot(quad[1].x - quad[0].x, quad[1].y - quad[0].y);
+  const wBot = Math.hypot(quad[2].x - quad[3].x, quad[2].y - quad[3].y);
+  const out = [];
+  quad.forEach((p, i) => {
+    const inset = Math.min(p.x, iw - p.x, p.y, ih - p.y);
+    const mm = inset * (2 * STUDIO_SW) / Math.max(i < 2 ? wTop : wBot, 1e-6);
+    if (mm < -PHOTO_EDGE_MM) out.push(i);
+  });
+  return out;
+}
+
+function rotationBetween(a, b) {
+  const A = rotationMatrix(a.rx, a.ry, a.rz), B = rotationMatrix(b.rx, b.ry, b.rz);
+  let tr = 0;
+  for (let i = 0; i < 9; i++) tr += A[i] * B[i];
+  return Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2))) * 180 / Math.PI;
+}
+
+// The same quad seen the other way round: tilt and turn flipped. With little
+// perspective in the quad the two fit almost equally and the fit can land on
+// either, so it is offered as an alternative rather than raised as a warning —
+// on the synthetic sweep it caught 94% of wrong picks, but most of the time it
+// shows up the first answer was right. Only returned when it is a genuinely
+// different orientation (over 10 degrees away) within half a point of the fit.
+function mirrorPose(quad, aspect, pose) {
+  const m = fitPose(quad, aspect, { rx: -pose.rx, ry: -pose.ry, rz: pose.rz, cz: pose.cz });
+  if (!m || !isFinite(m.e)) return null;
+  return rotationBetween(pose, m) > 10 && m.e - pose.e < 0.005 ? m : null;
+}
+
+function cornerWarning(flagged) {
+  // Reading order (top-left, top-right, bottom-left, bottom-right), not handle order.
+  const names = [0, 1, 3, 2].filter(i => flagged.includes(i)).map(i => CORNER_NAMES[i]);
+  const list = names.length === 4 ? 'All four corners'
+    : names.length === 1 ? names[0]
+    : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+  return list.charAt(0).toUpperCase() + list.slice(1) +
+    (names.length === 1 ? ' is' : ' are') +
+    ' past the photo edge. If the screen continues beyond it, the angle is a guess.';
+}
+
 function renderPhoto(canvas, W, H) {
   const ctx = canvas.getContext('2d');
   canvas.width = W; canvas.height = H;
@@ -2658,12 +2727,12 @@ function renderPhoto(canvas, W, H) {
   const g = warpTexture(texture, q, W, H, true,
     { radius: state.photoRadius / 100, aspect: 2.164 });
   if (g) ctx.drawImage(g, 0, 0);
-  if (canvas === preview) drawHandles(ctx, q, W);
+  if (canvas === preview) drawHandles(ctx, q, W, cornersPastEdge(photoQuad, iw, ih));
 }
 
 // Preview only. The export path renders to its own canvas, so the handles are
 // never baked into what gets inserted.
-function drawHandles(ctx, q, W) {
+function drawHandles(ctx, q, W, flagged) {
   // Divided by the view zoom so the handles keep a constant size on screen.
   // Left in canvas units they would grow with the magnification and swallow the
   // very corner being aimed at.
@@ -2678,6 +2747,14 @@ function drawHandles(ctx, q, W) {
   ctx.setLineDash([r, r]); ctx.stroke(); ctx.setLineDash([]);
   const cols = ['#FF2D87', '#00C8FF', '#FFBE00', '#00DC5A'];
   q.forEach((pt, i) => {
+    // An amber halo on a corner past the photo edge, so the one the status line
+    // names is also the one that stands out on the photo.
+    if (flagged && flagged.includes(i)) {
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, r * 2.1, 0, 7);
+      ctx.fillStyle = 'rgba(255,159,10,0.28)'; ctx.fill();
+      ctx.lineWidth = Math.max(2, W * 0.0035) / view.z;
+      ctx.strokeStyle = '#FF9F0A'; ctx.stroke();
+    }
     ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, 7);
     ctx.fillStyle = cols[i]; ctx.fill();
     ctx.lineWidth = Math.max(1.5, W * 0.003) / view.z;
@@ -3441,10 +3518,35 @@ function previewPose() {
   const pose = fitPose(photoQuad, STUDIO_ASPECT);
   if (!pose || !isFinite(pose.e)) return;
   const good = pose.e < 0.06;
-  setStatus('tilt <b>' + pose.rx.toFixed(1) + '\u00b0</b> turn <b>' +
-            pose.ry.toFixed(1) + '\u00b0</b> roll <b>' + pose.rz.toFixed(1) +
-            '\u00b0</b> \u2014 fit ' + (pose.e * 100).toFixed(1) + '%' +
-            (good ? '' : ', corners look off'), good);
+  photoFitStatus('tilt <b>' + pose.rx.toFixed(1) + '\u00b0</b> turn <b>' +
+                 pose.ry.toFixed(1) + '\u00b0</b> roll <b>' + pose.rz.toFixed(1) +
+                 '\u00b0</b> \u2014 fit ' + (pose.e * 100).toFixed(1) + '%' +
+                 (good ? '' : ', corners look off'), good, pose);
+}
+
+// Both angles on offer while the "try" button is showing, so a swap applies
+// exactly what the button said and swapping back returns the original rather
+// than a re-fit of the mirror, which lands a tenth of a degree away.
+let photoPoses = null;
+
+// The photo-fit readout, shared by the live preview and by Apply. A corner past
+// the photo edge wins outright: the mirror of a pose fitted to a guessed corner
+// is no more trustworthy than the pose itself, so it is not offered. `other`
+// forces a specific alternative, which is how a swap offers the way back.
+function photoFitStatus(lead, good, pose, other) {
+  const flagged = photoBitmap && photoQuad
+    ? cornersPastEdge(photoQuad, photoBitmap.width, photoBitmap.height) : [];
+  if (flagged.length) {
+    photoPoses = null;
+    setStatus(lead + '. ' + cornerWarning(flagged), good, true);
+    return;
+  }
+  const alt = other || mirrorPose(photoQuad, STUDIO_ASPECT, pose);
+  photoPoses = alt ? { shown: pose, other: alt } : null;
+  setStatus(lead + (alt
+    ? '<button class="alt" id="trypose">Try tilt ' + Math.round(alt.rx) +
+      '\u00b0 turn ' + Math.round(alt.ry) + '\u00b0</button>'
+    : ''), good);
 }
 
 for (const evt of ['pointerup', 'pointercancel']) {
@@ -3519,6 +3621,13 @@ document.getElementById('photofit').addEventListener('click', () => {
     setStatus('Could not read an angle from those corners', false);
     return;
   }
+  applyPhotoPose(pose);
+});
+
+// Puts a fitted pose on the Studio phone. Split out of the Apply handler so the
+// mirror suggestion can apply its alternative through the identical path; other,
+// when given, is offered back as the swap.
+function applyPhotoPose(pose, other) {
   // fitPose works in units where the display is one unit wide; Studio measures
   // in millimetres, so the camera distance scales with the half-diagonal.
   const camZ = pose.cz * (Math.hypot(71.5 / 2, 146.7 / 2) / Math.hypot(0.5, 2.1727 / 2));
@@ -3535,9 +3644,17 @@ document.getElementById('photofit').addEventListener('click', () => {
   refreshPresetChips();
   applyMode();
   const fit = (pose.e * 100).toFixed(1);
-  setStatus('Copied tilt <b>' + state.rx + '\u00b0</b> turn <b>' + state.ry +
-            '\u00b0</b> roll <b>' + state.rz + '\u00b0</b> \u2014 fit error ' + fit + '%',
-            pose.e < 0.06);
+  photoFitStatus('Copied tilt <b>' + state.rx + '\u00b0</b> turn <b>' + state.ry +
+                 '\u00b0</b> roll <b>' + state.rz + '\u00b0</b> \u2014 fit error ' + fit + '%',
+                 pose.e < 0.06, pose, other);
+}
+
+// One click on the suggestion applies it and offers the original back, so the
+// two can be compared on the phone by toggling.
+statusText.addEventListener('click', (ev) => {
+  if (!photoPoses || !ev.target.closest('#trypose')) return;
+  const { shown, other } = photoPoses;
+  applyPhotoPose(other, shown);
 });
 
 document.getElementById('imgreset').addEventListener('click', () => {
@@ -3613,9 +3730,9 @@ document.getElementById('matchbtn').addEventListener('click', () => {
     (off > 25 ? ' \u2014 not a close match' : ''), off <= 25);
 });
 
-function setStatus(text, live) {
+function setStatus(text, live, warn) {
   statusText.innerHTML = text;
-  statusDot.className = live ? 'dot' : 'dot idle';
+  statusDot.className = warn ? 'dot warn' : live ? 'dot' : 'dot idle';
 }
 
 // --- messages from the main thread -----------------------------------------
