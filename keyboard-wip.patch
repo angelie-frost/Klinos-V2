@@ -1,0 +1,246 @@
+diff --git a/ui.html b/ui.html
+index 5022e0a..b4ef605 100644
+--- a/ui.html
++++ b/ui.html
+@@ -1451,6 +1451,157 @@ float frontCut(vec3 p) {
+   return max(sec, prof);
+ }
+ 
++// --- keyboard, trackpad, speaker grilles -------------------------------------
++// Layout MEASURED on references/macbook-keyboard-topdown.png, which is the
++// 16-inch: scaled by its key pitch (24.00px over 13 intervals, sub-pixel uniform)
++// the deck comes out 357.9 x 250.0mm against the published 355.7 x 248.1, and the
++// trackpad 159.5mm. The 14-inch would need a 16.6mm key pitch, which Apple has
++// never shipped, so the model is not in doubt.
++// Column pitch 19.05 exact; row pitch 18.41 MEASURED (116px over 5 intervals) -
++// the rows really are tighter than the columns. Cap width 15.88 measured (a 20px
++// cap run against a 24px pitch). Cap DEPTH is inferred, not measured: neither
++// photo resolves it (the top-down is 1.26px/mm and per-row attempts scattered
++// over 3.2-10.3mm), so it is the row pitch less the same 3.17mm gap measured
++// between columns, which assumes Apple uses a uniform gap.
++// Cap relief above the deck is an ESTIMATE - not published, and a 1mm wall is
++// under a pixel in the only angled reference. Swept 0.7/1.0/1.3 on the prototype;
++// 1.0 chosen, 0.7 read too flat at the grazing presets.
++const float KB_WX = 140.40, KB_Z0 = -98.72, KB_Z1 = 13.02;
++const float KB_WELL = 0.60, KB_RELIEF = 1.00;
++const float KB_DISH = 0.10, KB_DISHR = 315.3;   // cap sag, and the sphere meeting the rim
++const float KB_CAPX = 15.88, KB_CAPR = 2.00;
++const float KB_CAPTONE = 0.77, KB_GAPTONE = 0.40;  // cap/groove against deck, measured
++const float TP_HW = 79.75, TP_CX = -0.30, TP_Z0 = 20.2, TP_Z1 = 120.2, TP_GROOVE = 0.30;
++const float GR_X0 = 141.2, GR_X1 = 179.0, GR_PITCH = 1.00, GR_R = 0.30;
++
++// In-plan distance to the nearest key cap, row-banded. The z test is a real
++// bound, not a lattice fold: a round()-based domain repetition is cheaper but its
++// field is not conservative, and on the prototype it was the only variant that
++// drove rays into the step ceiling, so it is not used here.
++float kbPlan(vec2 xz) {
++  float d = 1e3;
++  if (abs(xz.y - (-88.90)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-125.01, -88.90), vec2(12.70, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-101.20, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-82.15, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-63.10, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-44.05, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-25.00, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-5.95, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(13.10, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(32.15, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(51.20, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(70.25, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(89.30, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(108.35, -88.90), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(127.40, -88.90), vec2(7.94, 7.62), 2.00));
++  }
++  if (abs(xz.y - (-70.60)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-129.78, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-110.73, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-91.68, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-72.63, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-53.58, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-34.53, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-15.48, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(3.57, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(22.62, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(41.67, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(60.72, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(79.77, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(98.82, -70.60), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(122.64, -70.60), vec2(12.70, 7.62), 2.00));
++  }
++  if (abs(xz.y - (-52.00)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-125.01, -52.00), vec2(12.70, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-101.20, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-82.15, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-63.10, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-44.05, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-25.00, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-5.95, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(13.10, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(32.15, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(51.20, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(70.25, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(89.30, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(108.35, -52.00), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(127.40, -52.00), vec2(7.94, 7.62), 2.00));
++  }
++  if (abs(xz.y - (-33.30)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-122.63, -33.30), vec2(15.08, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-96.44, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-77.39, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-58.34, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-39.29, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-20.24, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-1.19, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(17.86, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(36.91, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(55.96, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(75.01, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(94.06, -33.30), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(120.26, -33.30), vec2(15.08, 7.62), 2.00));
++  }
++  if (abs(xz.y - (-15.10)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-117.87, -15.10), vec2(19.85, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-86.91, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-67.86, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-48.81, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-29.76, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-10.71, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(8.34, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(27.39, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(46.44, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(65.49, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(84.54, -15.10), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(115.49, -15.10), vec2(19.85, 7.62), 2.00));
++  }
++  if (abs(xz.y - (3.20)) < 26.03) {
++    d = min(d, sdRRect(xz - vec2(-129.78, 3.20), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-110.73, 3.20), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-91.68, 3.20), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-70.24, 3.20), vec2(10.32, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(-10.71, 3.20), vec2(46.04, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(48.82, 3.20), vec2(10.32, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(70.25, 3.20), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(89.30, 3.20), vec2(7.94, 7.62), 2.00));
++    d = min(d, sdRRect(xz - vec2(108.35, -0.61), vec2(7.94, 3.21), 1.00));
++    d = min(d, sdRRect(xz - vec2(108.35, 7.01), vec2(7.94, 3.21), 1.00));
++    d = min(d, sdRRect(xz - vec2(127.40, 3.20), vec2(7.94, 7.62), 2.00));
++  }
++  return d;
++}
++
++// The keyboard as a SOLID slab with the inter-key grooves cut into it, rather
++// than proud caps standing on a well floor. Same visible surface - the groove
++// bottom IS the well floor - but the volume beneath is solid, so a ray grazing
++// the deck terminates on the slab instead of threading the 3mm channels between
++// caps. That is worth a lot of march budget: on the prototype at full pixel
++// density, proud caps took Front from 46 steps to 440 of the 480 available and
++// ran rays out at Hero front; grooves in a solid slab bring it back to 343.
++// Same grazing-ray problem the deck itself had, and the same kind of fix.
++float sdKeyboard(vec3 p, out float plan) {
++  plan = 1e3;
++  if (abs(p.x) > KB_WX + 4.0 || p.z < KB_Z0 - 4.0 || p.z > KB_Z1 + 4.0 ||
++      p.y > KB_RELIEF + 2.0 || p.y < -KB_WELL - 3.0) return 1e3;
++  float slabPlan = sdRRect(vec2(p.x, p.z - (KB_Z0 + KB_Z1) * 0.5),
++                           vec2(KB_WX, (KB_Z1 - KB_Z0) * 0.5), 4.0);
++  float slabH = abs(p.y - (KB_RELIEF - KB_WELL) * 0.5) - (KB_RELIEF + KB_WELL) * 0.5;
++  plan = kbPlan(p.xz);
++  float groove = max(-plan, -KB_WELL - p.y);
++  float d = max(cyl(slabPlan, slabH), -groove);
++  // Dish the cap tops. For a cap of half-size a the radius from its centre is
++  // a + plan (plan is negative inside), so this reuses the per-key work.
++  float r = max(KB_CAPX * 0.5 + plan, 0.0);
++  float dishY = KB_RELIEF + KB_DISHR - KB_DISH
++              - sqrt(max(KB_DISHR * KB_DISHR - r * r, 0.0));
++  if (plan < 0.0) d = max(d, dishY - p.y);
++  return d;
++}
++
++float sdKeyboardD(vec3 p) { float pl; return sdKeyboard(p, pl); }
++
+ // Fraction of the sky a point inside a port can see, as STUDIO_FRAG's cavityVis:
+ // without it a 5mm socket is lit like the wall and reads as a bump, not a hole.
+ float portVis(vec3 p, float cut, float radial) {
+@@ -1461,7 +1612,8 @@ float portVis(vec3 p, float cut, float radial) {
+ }
+ 
+ float map(vec3 p) {
+-  return min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM), sdLid(p));
++  return min(min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM),
++                 sdLid(p)), sdKeyboardD(p));
+ }
+ 
+ vec3 normalAt(vec3 p) {
+@@ -1565,7 +1717,12 @@ vec4 shadeRay(vec2 fc, out float edge) {
+   // its distance per step and needs up to ~470; at 160 those rays ran out and the
+   // closest-miss coverage below turned the deck see-through (Hero front: 12 rows
+   // fully clear at 2592x3240). Rays that hit or leave the sphere still stop early.
+-  for (int i = 0; i < 480; i++) {
++  // Raised from 480 with the keyboard: measured at full pixel density on the
++  // prototype, the deck detail takes Front from 46 steps to 343 and pushes Hero
++  // front into the ceiling (every such ray was still caught by the half-pixel
++  // rescue below, so nothing showed through, but there was no headroom left).
++  // 640 clears it at every preset and both finishes.
++  for (int i = 0; i < 640; i++) {
+     vec3 p = ro + rd * t;
+     float d = map(p);
+     float px = pxK * t;
+@@ -1635,6 +1792,49 @@ vec4 shadeRay(vec2 fc, out float edge) {
+   // No darkening in the indent: it is an open scoop, and the prototype's cavity
+   // term made it read as a hole where the photo shows it lighter than the face.
+   float dInd = frontCut(p);
++
++  // --- deck detail -----------------------------------------------------------
++  // Key caps are geometry (see sdKeyboard); trackpad, grilles and the cap/groove
++  // tones are painted, blended by their own coverage rather than hard tested -
++  // the notch path records why a boolean stair-steps.
++  float kbPl;
++  float dKb = sdKeyboard(p, kbPl);
++  // Two masks: the cap material follows the geometry wherever it faces, because
++  // at the grazing presets the cap SIDE walls are much of what is visible (they
++  // project 3.5-5.1px, as wide as the gaps themselves). The painted details are
++  // surface markings on the deck's top face, so those keep the upward-normal test.
++  float onDeck = (1.0 - onLid) * (1.0 - step(1.8, abs(p.y)));
++  float onTop = onDeck * smoothstep(0.3, 0.7, n.y);
++  // Caps are a darker material than the deck, not deck at another height:
++  // measured on the top-down photo, deck ~44/255 against cap ~34, groove ~18.
++  float onCap = onDeck * (1.0 - smoothstep(0.0, pxmm, dKb)) * (1.0 - step(0.0, kbPl));
++  metal *= mix(1.0, KB_CAPTONE, onCap);
++  // Cavity term for the groove floor, as portVis does for the ports: a 3mm slot
++  // lit like open deck reads as a seam rather than a gap.
++  float inGap = onDeck * step(0.0, kbPl) * (1.0 - step(3.0, kbPl))
++              * (1.0 - step(KB_RELIEF * 0.5, p.y));
++  metal *= mix(1.0, KB_GAPTONE + (1.0 - KB_GAPTONE) * clamp(kbPl / 1.6, 0.0, 1.0), inGap);
++  // Trackpad: flush with the deck, delineated by a hairline groove, so painted -
++  // it has no relief to render, which makes it the notch case, not the port case.
++  float dTp = sdRRect(vec2(p.x - TP_CX, p.z - (TP_Z0 + TP_Z1) * 0.5),
++                      vec2(TP_HW, (TP_Z1 - TP_Z0) * 0.5), 6.0);
++  metal *= mix(1.0, 0.45, onTop * (1.0 - smoothstep(TP_GROOVE, TP_GROOVE + pxmm, abs(dTp))));
++  metal *= mix(1.0, 0.94, onTop * (1.0 - smoothstep(-pxmm, pxmm, dTp)));
++  // Speaker grilles. The 1mm lattice is ~5px across at export but under 1.5px in
++  // the 900px preview, so resolve the holes only while a pixel sits well inside
++  // the pitch and otherwise fade to the lattice mean - the same footprint
++  // reasoning as aa, and it is what keeps the preview from moireing.
++  float grBand = onTop
++    * smoothstep(GR_X0 - pxmm, GR_X0 + pxmm, abs(p.x))
++    * (1.0 - smoothstep(GR_X1 - pxmm, GR_X1 + pxmm, abs(p.x)))
++    * smoothstep(KB_Z0 - pxmm, KB_Z0 + pxmm, p.z)
++    * (1.0 - smoothstep(KB_Z1 - pxmm, KB_Z1 + pxmm, p.z));
++  vec2 grQ = mod(vec2(p.x, p.z) + GR_PITCH * 0.5, GR_PITCH) - GR_PITCH * 0.5;
++  float hole = 1.0 - smoothstep(GR_R - pxmm, GR_R + pxmm, length(grQ));
++  // 0.68 is the lattice mean: a 0.3mm hole on a 1mm pitch covers 28% of the band.
++  float perf = mix(0.68, mix(0.85, 0.25, hole),
++                   1.0 - smoothstep(GR_PITCH * 0.30, GR_PITCH * 0.60, pxmm));
++  metal *= mix(1.0, perf, grBand);
+   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
+   metal *= mix(1.0, HAIR_K, seam);
+ 
+@@ -1651,7 +1851,8 @@ vec4 shadeRay(vec2 fc, out float edge) {
+   if (max(dBase, dLid) < 2.0 * pxmm ||
+       (onFace > 0.0 && (abs(dGlass) < 2.0 * aa || abs(dDisp) < 2.0 * aa)) ||
+       nearBaseEdge > 0.5 || nearLidEdge > 0.5 ||
+-      (onLid < 0.5 && (abs(dCut) < 2.0 * pxmm || abs(dInd) < IND_RIM + 2.0 * pxmm))) edge = 1.0;
++      (onLid < 0.5 && (abs(dCut) < 2.0 * pxmm || abs(dInd) < IND_RIM + 2.0 * pxmm ||
++                       abs(kbPl) < 2.0 * pxmm || abs(dTp) < TP_GROOVE + 2.0 * pxmm))) edge = 1.0;
+ 
+   return vec4(col, cover);
+ }
