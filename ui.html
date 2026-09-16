@@ -1313,7 +1313,7 @@ uniform float uImgZoom;
 
 const float W = 355.7, DEP = 248.1;              // published
 const float TB = 11.95, TL = 3.3, GAP = 0.3;     // base body, lid, closed gap
-const float LL = 245.0;                          // lid length
+const float LL = 248.1;                          // lid length
 const float RP = 10.5, RT = 0.5, RB = 4.4, RL = 1.2;
 const float HE = 3.65, HT0 = 3.65;               // lid behind the axis; axis to inner face
 const float DW = 345.6, DH = 223.4;              // display, from 3456x2234 @ 254 ppi
@@ -2101,7 +2101,7 @@ vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)
 // The laptop for the reflection: base and lid slabs only, same numbers and hinge
 // as LAPTOP_FRAG. Silhouette is all a reflection needs, so no display, notch or
 // hinge band.
-const float L_W = 355.7, L_DEP = 248.1, L_TB = 11.95, L_TL = 3.3, L_GAP = 0.3, L_LL = 245.0;
+const float L_W = 355.7, L_DEP = 248.1, L_TB = 11.95, L_TL = 3.3, L_GAP = 0.3, L_LL = 248.1;
 const float L_RP = 10.5, L_RT = 0.5, L_RB = 4.4, L_RL = 1.2, L_HE = 3.65, L_HT0 = 3.65;
 const float L_AZ = -L_DEP * 0.5 + L_HE;
 const float L_AY = L_GAP - L_HE;
@@ -2542,7 +2542,7 @@ const STUDIO_SW = 71.5 / 2 - 2.4, STUDIO_SH = 146.7 / 2 - 2.4;
 
 // The Studio laptop, millimetres. The same numbers as LAPTOP_FRAG's constants
 // (and BACKDROP_FRAG's L_ copies) — change one set and the others must follow.
-const LAPTOP = { W: 355.7, D: 248.1, Tb: 11.95, Tl: 3.3, gap: 0.3, Ll: 245.0, Rp: 10.5,
+const LAPTOP = { W: 355.7, D: 248.1, Tb: 11.95, Tl: 3.3, gap: 0.3, Ll: 248.1, Rp: 10.5,
                  e: 3.65, t0: 3.65, DW: 345.6, DH: 223.4, topBez: 5.5 };
 LAPTOP.Az = -LAPTOP.D / 2 + LAPTOP.e;
 LAPTOP.Ay = LAPTOP.gap - LAPTOP.e;
