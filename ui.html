@@ -1451,6 +1451,188 @@ float frontCut(vec3 p) {
   return max(sec, prof);
 }
 
+// --- keyboard: analytic heightfield ------------------------------------------
+// The caps are NOT in map(). An earlier attempt put 77 per-key sdRRect calls in
+// the march loop; ANGLE hands that to D3D, which unrolls the loop, and link time
+// went 22s -> 273-350s and cost the whole plugin its GL context. Here map() gains
+// one flat slab and the key pattern is resolved once per pixel after the march.
+//
+// Layout MEASURED on references/macbook-keyboard-topdown.png (the 16-inch: its
+// 24.00px key pitch scales the deck to 357.9 x 250.0mm against a published
+// 355.7 x 248.1). Column pitch 19.05 exact, cap 15.88 across, gap 3.17 measured.
+// Cap DEPTH is inferred, not measured - the row pitch less that same gap. Cap
+// relief is an ESTIMATE, picked by a 0.7/1.0/1.3 sweep against the angled photo.
+const float KB_X0 = -139.30, KB_P = 19.05, KB_G = 3.17;
+const float KB_HZ = 7.620, KB_R = 2.00, KB_SPAN = 14.5;
+const float KB_TOP = 1.00, KB_FLOOR = -0.60;
+const float KB_RZ0 = -88.90, KB_RZP = 18.449;   // row index only; centres are exact below
+const float KB_XC = -1.188, KB_BX = 138.113;     // exact cap bounding box, not the well box
+const float KB_ZC = -42.850, KB_BZ = 53.670;
+const float KB_EPS = 0.20, KB_MAXSTEP = 5.0;
+const float KB_DISHR = 315.3, KB_DISH = 0.10;
+const float KB_CAPTONE = 0.77, KB_GAPTONE = 0.40;  // measured against the deck
+
+// Row centres are looked up EXACTLY, not taken from the uniform fit. Checked on
+// the prototype over 400k samples: the fitted centre disagrees with a true
+// 77-shape min() on 0.84% of samples, the exact lookup on 0.0000%.
+float kbRowZ(float k) {
+  return k < 0.5 ? -88.90 : (k < 1.5 ? -70.60 : (k < 2.5 ? -52.00 :
+         (k < 3.5 ? -33.30 : (k < 4.5 ? -15.10 : 3.20))));
+}
+
+// Cap slots PARTITION x within a row, so the nearest cap is always the one in the
+// containing slot - one sdRRect, never a min() over keys. That is the whole reason
+// this is affordable. Verified to reproduce all 77 of the old patch's constants.
+void kbSlot(float u, float k, out float lo, out float hi) {
+  if (k < 4.5) {
+    float wL = k < 0.5 ? 1.50 : (k < 1.5 ? 1.00 : (k < 2.5 ? 1.50 : (k < 3.5 ? 1.75 : 2.25)));
+    float wR = k < 0.5 ? 1.00 : (k < 1.5 ? 1.50 : (k < 2.5 ? 1.00 : (k < 3.5 ? 1.75 : 2.25)));
+    float n  = k < 2.5 ? 12.0 : (k < 3.5 ? 11.0 : 10.0);
+    if (u < wL) { lo = 0.0; hi = wL; }
+    else if (u > wL + n) { lo = KB_SPAN - wR; hi = KB_SPAN; }
+    else { float j = clamp(floor(u - wL), 0.0, n - 1.0); lo = wL + j; hi = lo + 1.0; }
+  } else {
+    if (u < 1.00) { lo = 0.00; hi = 1.00; }
+    else if (u < 2.00) { lo = 1.00; hi = 2.00; }
+    else if (u < 3.00) { lo = 2.00; hi = 3.00; }
+    else if (u < 4.25) { lo = 3.00; hi = 4.25; }
+    else if (u < 9.25) { lo = 4.25; hi = 9.25; }
+    else if (u < 10.50) { lo = 9.25; hi = 10.50; }
+    else if (u < 11.50) { lo = 10.50; hi = 11.50; }
+    else if (u < 12.50) { lo = 11.50; hi = 12.50; }
+    else if (u < 13.50) { lo = 12.50; hi = 13.50; }
+    else { lo = 13.50; hi = 14.50; }
+  }
+}
+
+// Distance AND gradient from one computation. The gradient is the cap side-wall
+// normal, which is what makes real geometry worth having at the grazing presets -
+// finite differences would cost 2-4 extra kbPlan calls for the same thing.
+float sdRRectG(vec2 p, vec2 half_, float r, out vec2 g) {
+  vec2 q = abs(p) - half_ + r;
+  vec2 s = sign(p);
+  vec2 m = max(q, 0.0);
+  float ln = length(m);
+  if (max(q.x, q.y) > 0.0) {
+    g = s * m / max(ln, 1e-6);
+    return ln - r;
+  }
+  g = q.x > q.y ? vec2(s.x, 0.0) : vec2(0.0, s.y);
+  return max(q.x, q.y) - r;
+}
+
+float kbPlan(vec2 xz, out vec2 g, out vec2 cc) {
+  float k = clamp(floor((xz.y - KB_RZ0) / KB_RZP + 0.5), 0.0, 5.0);
+  float zc = kbRowZ(k);
+  float u = (xz.x - KB_X0) / KB_P;
+  float lo, hi; kbSlot(u, k, lo, hi);
+  float cx = KB_X0 + KB_P * (lo + hi) * 0.5;
+  float hx = (KB_P * (hi - lo) - KB_G) * 0.5;
+  float hz = KB_HZ, r = KB_R;
+  // the arrow cluster's up/down pair is two half-depth caps in one slot
+  if (k > 4.5 && u >= 12.50 && u < 13.50) {
+    zc += (xz.y > zc ? 1.0 : -1.0) * KB_HZ * 0.5;
+    hz = KB_HZ * 0.5 - 0.6; r = KB_R * 0.5;
+  }
+  cc = vec2(cx, zc);
+  return sdRRectG(xz - cc, vec2(hx, hz), r, g);
+}
+
+// The ONLY keyboard term inside map(): one rounded box. Union, no smax - carving
+// the well here would need a second sdRRect and double the in-loop cost, and the
+// resolve carves it anyway. Measured at +12.4% link time on its own.
+float sdKbSlab(vec3 p) {
+  if (abs(p.x - KB_XC) > KB_BX + 2.0 || abs(p.z - KB_ZC) > KB_BZ + 2.0 ||
+      p.y > KB_TOP + 2.0 || p.y < KB_FLOOR - 2.0) return 1e3;
+  float plan = sdRRect(vec2(p.x - KB_XC, p.z - KB_ZC), vec2(KB_BX, KB_BZ), 4.0);
+  float h = abs(p.y - (KB_TOP + KB_FLOOR) * 0.5) - (KB_TOP - KB_FLOOR) * 0.5;
+  return cyl(plan, h);
+}
+
+// Resolve the ray against the binary heightfield: height is KB_TOP inside a cap
+// footprint and KB_FLOOR outside it. Runs ONCE per pixel, never inside the march.
+//
+// Conservative trace in PLAN space: kbPlan is a distance field, so a step of d is
+// provably empty and cannot skip a cap at any view angle. A fixed linear march
+// would need 61 steps at the Hero front preset (1.4 deg elevation, where the ray
+// crosses 3.4 key pitches inside a 1.6mm slab) and would still be brittle. The
+// small KB_EPS overshoot is what creates a bracket; a pure sphere trace converges
+// from outside and never goes negative. KB_MAXSTEP licenses the nearest-row-only
+// kbPlan, which is not a strict lower bound (max overestimate 1.63mm on the
+// prototype, well inside the 5mm clamp).
+// kind: 0 cap top, 1 cap wall, 2 well floor, 3 deck.
+float kbResolve(vec3 ro, vec3 rd, inout float t, out vec3 nOut, out float kind,
+                out float dPlan, out vec2 gOut) {
+  nOut = vec3(0.0, 1.0, 0.0); kind = 3.0; dPlan = 1e3; gOut = vec2(0.0);
+  // At ~0 elevation the plane intersections run to +-inf and NaNs reach the output.
+  if (rd.y > -0.004) return 0.0;
+  float tTop = (KB_TOP - ro.y) / rd.y;
+  float tBot = (KB_FLOOR - ro.y) / rd.y;
+  // Enter at the slab AABB, not the top plane. Without this the slab reads as a
+  // solid 1mm lip exactly where the bottom row's gaps should show through.
+  float rx = abs(rd.x) < 1e-6 ? 1e-6 : rd.x;
+  float rz = abs(rd.z) < 1e-6 ? 1e-6 : rd.z;
+  float ax0 = (KB_XC - KB_BX - ro.x) / rx, ax1 = (KB_XC + KB_BX - ro.x) / rx;
+  float az0 = (KB_ZC - KB_BZ - ro.z) / rz, az1 = (KB_ZC + KB_BZ - ro.z) / rz;
+  float tIn  = max(min(ax0, ax1), min(az0, az1));
+  float tOut = min(max(ax0, ax1), max(az0, az1));
+  float tc = max(tTop, tIn);
+  float tEnd = min(tBot, tOut);
+  if (tEnd <= tc) return 0.0;
+  float cPlan = max(length(vec2(rd.x, rd.z)), 1e-6);
+
+  vec2 g, cc;
+  float d = kbPlan(vec2(ro.x + rd.x * tc, ro.z + rd.z * tc), g, cc);
+  bool done = d < 0.0;
+  float tHit = done ? tc : tEnd;
+  kind = done ? 0.0 : 2.0;
+  dPlan = d; gOut = g;
+  float tPrev = tc, dPrev = d;
+  // The trace loop only finds a BRACKET. The false-position refinement is
+  // hoisted out of it: nesting the two-step refine inside the trace made D3D
+  // unroll 24 x 3 kbPlan calls instead of 24 x 1 + 2, and link time came in at
+  // 58-68s against a 22s baseline. Hoisted, it is 26 calls per shadeRay, not 120.
+  float tA = tc, tB = tc, dA = d, dB = d;
+  bool bracket = false;
+  for (int i = 0; i < 24; i++) {
+    if (done || tc >= tEnd) break;
+    tPrev = tc; dPrev = d;
+    tc = min(tc + min(d + KB_EPS, KB_MAXSTEP) / cPlan, tEnd);
+    d = kbPlan(vec2(ro.x + rd.x * tc, ro.z + rd.z * tc), g, cc);
+    if (d < 0.0) {
+      tA = tPrev; dA = dPrev; tB = tc; dB = d; bracket = true; done = true;
+    }
+  }
+  if (bracket) {
+    // two false-position steps; kbPlan is near-linear against a flat wall, so
+    // this beats five bisections on both accuracy and cost
+    for (int j = 0; j < 2; j++) {
+      float den = abs(dB - dA) < 1e-9 ? 1e-9 : dB - dA;
+      float tm = clamp(tA - dA * (tB - tA) / den, min(tA, tB), max(tA, tB));
+      float dm = kbPlan(vec2(ro.x + rd.x * tm, ro.z + rd.z * tm), g, cc);
+      if (dm < 0.0) { tB = tm; dB = dm; } else { tA = tm; dA = dm; }
+    }
+    tHit = tB; kind = 1.0; dPlan = dB; gOut = g;
+  }
+  // Left the footprint without meeting a cap: the ray never touched a key, so fall
+  // back to the deck plane. This third outcome is what removes the phantom lip.
+  if (kind > 1.5 && tEnd < tBot - 1e-4) {
+    tHit = (0.0 - ro.y) / rd.y; kind = 3.0;
+  }
+  t = tHit;
+  vec3 ph = ro + rd * tHit;
+  if (kind < 0.5) {
+    // Cap top: flat hit, dished NORMAL only. Tracing the true dish would move the
+    // hit by sag/sin(elev) = 7.3mm in plan at 1.4 deg - far worse than it fixes.
+    vec2 gg, cc2;
+    dPlan = kbPlan(vec2(ph.x, ph.z), gg, cc2);
+    nOut = normalize(vec3(-(ph.x - cc2.x) / KB_DISHR, 1.0, -(ph.z - cc2.y) / KB_DISHR));
+  } else if (kind < 1.5) {
+    nOut = vec3(gOut.x, 0.0, gOut.y);
+  }
+  return 1.0;
+}
+
 // Fraction of the sky a point inside a port can see, as STUDIO_FRAG's cavityVis:
 // without it a 5mm socket is lit like the wall and reads as a bump, not a hole.
 float portVis(vec3 p, float cut, float radial) {
@@ -1461,7 +1643,8 @@ float portVis(vec3 p, float cut, float radial) {
 }
 
 float map(vec3 p) {
-  return min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM), sdLid(p));
+  return min(min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM),
+                 sdLid(p)), sdKbSlab(p));
 }
 
 vec3 normalAt(vec3 p) {
@@ -1586,6 +1769,17 @@ vec4 shadeRay(vec2 fc, out float edge) {
 
   vec3 p = ro + rd * t;
   vec3 n = normalAt(p);
+  // Keyboard heightfield, resolved once here rather than inside map(). Placed
+  // before nw/vw/pxmm so the corrected normal and depth feed the existing
+  // material path unchanged. Skipped on a closest-miss: that t is tBest, a point
+  // on no surface, where kbPlan is meaningless.
+  float kbKind = 3.0, kbD = 1e3, kbOn = 0.0;
+  vec3 kbN = n; vec2 kbG = vec2(0.0);
+  if (hit && sdKbSlab(p) < 0.05) {
+    float tk = t;
+    kbOn = kbResolve(ro, rd, tk, kbN, kbKind, kbD, kbG);
+    if (kbOn > 0.5) { t = tk; p = ro + rd * t; n = kbN; }
+  }
   vec3 nw = uRot * n;
   vec3 vw = uRot * (-rd);
   float pxmm = pxK * t;
@@ -1635,6 +1829,20 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // No darkening in the indent: it is an open scoop, and the prototype's cavity
   // term made it read as a hole where the photo shows it lighter than the face.
   float dInd = frontCut(p);
+  // Cap and groove tone. Antialiased analytically from the plan gradient rather
+  // than by flagging key boundaries as edges: at the grazing presets almost every
+  // keyboard pixel is within 2px of a cap boundary in projection, so flagging them
+  // would push ~40% of the frame through 5 rays x 480 steps. Same footprint
+  // reasoning as aa above.
+  if (kbOn > 0.5 && kbKind < 2.5) {
+    float kw = pxmm / max(abs(dot(normalize(vec2(rd.x, rd.z)), kbG)), 0.15);
+    float capA = smoothstep(-kw, kw, -kbD);
+    metal *= mix(1.0, KB_CAPTONE, capA);
+    // the groove floor and the base of a wall sit in shadow; the depth ramp is
+    // the strongest cue that the caps stand proud
+    float ao = clamp((p.y - KB_FLOOR) / (KB_TOP - KB_FLOOR), 0.0, 1.0);
+    metal *= mix(mix(KB_GAPTONE, 1.0, ao), 1.0, capA);
+  }
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
   metal *= mix(1.0, HAIR_K, seam);
 
