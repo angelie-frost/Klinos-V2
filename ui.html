@@ -809,6 +809,8 @@ const STUDIO_FRAG = `
 precision highp float;
 
 uniform vec2  uRes;
+uniform vec2  uOrigin;   // tile origin in the virtual frame
+uniform float uJit;      // 1 = rotated-grid jitter (2x supersampling), 0 = off
 uniform mat3  uRot;      // object -> world, for normals
 uniform mat3  uRotT;     // world -> object, for rays
 uniform float uCamZ, uTanHalf, uAspect;
@@ -1242,24 +1244,32 @@ vec4 shadeRay(vec2 fc, out float edge) {
 
   return vec4(col, cover);
 }
-
-// Four more rays on a rotated grid, only where shadeRay flagged an edge — a thin
-// outline, about 2.5% of the frame at the presets, so the whole-frame cost
-// barely moves. Averaged premultiplied, written straight. Prototype band error
-// against a 16-ray reference fell from 14.9 to 3.8 (0-255) with this, the
-// silhouette coverage and the analytic seams together.
+// One ray per pixel. The frame is rendered at SS x and box-downsampled instead
+// (renderTiled), which is both cheaper to COMPILE and more accurate than the four
+// extra rays this used to take. ANGLE hands the shader to D3D, which inlines every
+// shadeRay call and whose compile cost is steeply superlinear in inlined body
+// size: five copies of shadeRay cost 22.5s to link against 1.1s for one, and with
+// the laptop keyboard in place five copies reached 49s and cost the plugin its GL
+// context. Measured edge error against a 16-sample reference, 0-255: five rays
+// 5.56, one ray alone 8.21, one ray at 2x supersampling 2.98. Re-checked against a
+// 25-sample reference at 5x, coprime with both, to rule out the two box filters
+// agreeing by construction: 2.96.
 void main() {
-  float edge, e;
-  vec4 c = shadeRay(gl_FragCoord.xy, edge);
-  if (edge > 0.5) {
-    vec3 acc = c.rgb * c.a;
-    float cov = c.a;
-    vec4 s = shadeRay(gl_FragCoord.xy + vec2( 0.125,  0.375), e); acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2(-0.375,  0.125), e);      acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2(-0.125, -0.375), e);      acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2( 0.375, -0.125), e);      acc += s.rgb * s.a; cov += s.a;
-    c = vec4(acc / max(cov, 1e-4), cov / 5.0);
-  }
+  // edge is now write-only: with one ray there is nothing to blend, so leaving it
+  // unread lets the compiler drop the whole edge predicate inside shadeRay too.
+  float edge;
+  // Rotated-grid jitter. The 2x2 supersample grid is axis-aligned, which gives it
+  // only two distinct x positions and two distinct y - the worst possible shape for
+  // the vertical and horizontal edges that dominate the Flat preset. Nudging each
+  // subsample a quarter of a virtual pixel off its cell centre puts the four on a
+  // rotated grid, which is what the 4-ray pattern this replaced was for. Same four
+  // samples and the same exact 2:1 box downsample; only where each is taken moves.
+  // Flat's axis-aligned edge error, 0-255 against a 16-sample reference: old 5-ray
+  // 3.86, plain 2x 4.60, jittered 1.08.
+  vec2 fc = gl_FragCoord.xy + uOrigin;
+  vec2 jit = vec2(mod(floor(fc.y), 2.0) < 0.5 ? -0.25 : 0.25,
+                  mod(floor(fc.x), 2.0) < 0.5 ?  0.25 : -0.25);
+  vec4 c = shadeRay(fc + jit * uJit, edge);
   if (c.a <= 0.0) discard;
   // Straight alpha, as SCREEN_FRAG writes — the context is premultipliedAlpha: false.
   gl_FragColor = c;
@@ -1286,6 +1296,8 @@ const LAPTOP_FRAG = `
 precision highp float;
 
 uniform vec2  uRes;
+uniform vec2  uOrigin;   // tile origin in the virtual frame
+uniform float uJit;      // 1 = rotated-grid jitter (2x supersampling), 0 = off
 uniform mat3  uRot;      // object -> world, for normals
 uniform mat3  uRotT;     // world -> object, for rays
 uniform float uCamZ, uTanHalf, uAspect;
@@ -1451,6 +1463,188 @@ float frontCut(vec3 p) {
   return max(sec, prof);
 }
 
+// --- keyboard: analytic heightfield ------------------------------------------
+// The caps are NOT in map(). An earlier attempt put 77 per-key sdRRect calls in
+// the march loop; ANGLE hands that to D3D, which unrolls the loop, and link time
+// went 22s -> 273-350s and cost the whole plugin its GL context. Here map() gains
+// one flat slab and the key pattern is resolved once per pixel after the march.
+//
+// Layout MEASURED on references/macbook-keyboard-topdown.png (the 16-inch: its
+// 24.00px key pitch scales the deck to 357.9 x 250.0mm against a published
+// 355.7 x 248.1). Column pitch 19.05 exact, cap 15.88 across, gap 3.17 measured.
+// Cap DEPTH is inferred, not measured - the row pitch less that same gap. Cap
+// relief is an ESTIMATE, picked by a 0.7/1.0/1.3 sweep against the angled photo.
+const float KB_X0 = -139.30, KB_P = 19.05, KB_G = 3.17;
+const float KB_HZ = 7.620, KB_R = 2.00, KB_SPAN = 14.5;
+const float KB_TOP = 1.00, KB_FLOOR = -0.60;
+const float KB_RZ0 = -88.90, KB_RZP = 18.449;   // row index only; centres are exact below
+const float KB_XC = -1.188, KB_BX = 138.113;     // exact cap bounding box, not the well box
+const float KB_ZC = -42.850, KB_BZ = 53.670;
+const float KB_EPS = 0.20, KB_MAXSTEP = 5.0;
+const float KB_DISHR = 315.3, KB_DISH = 0.10;
+const float KB_CAPTONE = 0.77, KB_GAPTONE = 0.40;  // measured against the deck
+
+// Row centres are looked up EXACTLY, not taken from the uniform fit. Checked on
+// the prototype over 400k samples: the fitted centre disagrees with a true
+// 77-shape min() on 0.84% of samples, the exact lookup on 0.0000%.
+float kbRowZ(float k) {
+  return k < 0.5 ? -88.90 : (k < 1.5 ? -70.60 : (k < 2.5 ? -52.00 :
+         (k < 3.5 ? -33.30 : (k < 4.5 ? -15.10 : 3.20))));
+}
+
+// Cap slots PARTITION x within a row, so the nearest cap is always the one in the
+// containing slot - one sdRRect, never a min() over keys. That is the whole reason
+// this is affordable. Verified to reproduce all 77 of the old patch's constants.
+void kbSlot(float u, float k, out float lo, out float hi) {
+  if (k < 4.5) {
+    float wL = k < 0.5 ? 1.50 : (k < 1.5 ? 1.00 : (k < 2.5 ? 1.50 : (k < 3.5 ? 1.75 : 2.25)));
+    float wR = k < 0.5 ? 1.00 : (k < 1.5 ? 1.50 : (k < 2.5 ? 1.00 : (k < 3.5 ? 1.75 : 2.25)));
+    float n  = k < 2.5 ? 12.0 : (k < 3.5 ? 11.0 : 10.0);
+    if (u < wL) { lo = 0.0; hi = wL; }
+    else if (u > wL + n) { lo = KB_SPAN - wR; hi = KB_SPAN; }
+    else { float j = clamp(floor(u - wL), 0.0, n - 1.0); lo = wL + j; hi = lo + 1.0; }
+  } else {
+    if (u < 1.00) { lo = 0.00; hi = 1.00; }
+    else if (u < 2.00) { lo = 1.00; hi = 2.00; }
+    else if (u < 3.00) { lo = 2.00; hi = 3.00; }
+    else if (u < 4.25) { lo = 3.00; hi = 4.25; }
+    else if (u < 9.25) { lo = 4.25; hi = 9.25; }
+    else if (u < 10.50) { lo = 9.25; hi = 10.50; }
+    else if (u < 11.50) { lo = 10.50; hi = 11.50; }
+    else if (u < 12.50) { lo = 11.50; hi = 12.50; }
+    else if (u < 13.50) { lo = 12.50; hi = 13.50; }
+    else { lo = 13.50; hi = 14.50; }
+  }
+}
+
+// Distance AND gradient from one computation. The gradient is the cap side-wall
+// normal, which is what makes real geometry worth having at the grazing presets -
+// finite differences would cost 2-4 extra kbPlan calls for the same thing.
+float sdRRectG(vec2 p, vec2 half_, float r, out vec2 g) {
+  vec2 q = abs(p) - half_ + r;
+  vec2 s = sign(p);
+  vec2 m = max(q, 0.0);
+  float ln = length(m);
+  if (max(q.x, q.y) > 0.0) {
+    g = s * m / max(ln, 1e-6);
+    return ln - r;
+  }
+  g = q.x > q.y ? vec2(s.x, 0.0) : vec2(0.0, s.y);
+  return max(q.x, q.y) - r;
+}
+
+float kbPlan(vec2 xz, out vec2 g, out vec2 cc) {
+  float k = clamp(floor((xz.y - KB_RZ0) / KB_RZP + 0.5), 0.0, 5.0);
+  float zc = kbRowZ(k);
+  float u = (xz.x - KB_X0) / KB_P;
+  float lo, hi; kbSlot(u, k, lo, hi);
+  float cx = KB_X0 + KB_P * (lo + hi) * 0.5;
+  float hx = (KB_P * (hi - lo) - KB_G) * 0.5;
+  float hz = KB_HZ, r = KB_R;
+  // the arrow cluster's up/down pair is two half-depth caps in one slot
+  if (k > 4.5 && u >= 12.50 && u < 13.50) {
+    zc += (xz.y > zc ? 1.0 : -1.0) * KB_HZ * 0.5;
+    hz = KB_HZ * 0.5 - 0.6; r = KB_R * 0.5;
+  }
+  cc = vec2(cx, zc);
+  return sdRRectG(xz - cc, vec2(hx, hz), r, g);
+}
+
+// The ONLY keyboard term inside map(): one rounded box. Union, no smax - carving
+// the well here would need a second sdRRect and double the in-loop cost, and the
+// resolve carves it anyway. Measured at +12.4% link time on its own.
+float sdKbSlab(vec3 p) {
+  if (abs(p.x - KB_XC) > KB_BX + 2.0 || abs(p.z - KB_ZC) > KB_BZ + 2.0 ||
+      p.y > KB_TOP + 2.0 || p.y < KB_FLOOR - 2.0) return 1e3;
+  float plan = sdRRect(vec2(p.x - KB_XC, p.z - KB_ZC), vec2(KB_BX, KB_BZ), 4.0);
+  float h = abs(p.y - (KB_TOP + KB_FLOOR) * 0.5) - (KB_TOP - KB_FLOOR) * 0.5;
+  return cyl(plan, h);
+}
+
+// Resolve the ray against the binary heightfield: height is KB_TOP inside a cap
+// footprint and KB_FLOOR outside it. Runs ONCE per pixel, never inside the march.
+//
+// Conservative trace in PLAN space: kbPlan is a distance field, so a step of d is
+// provably empty and cannot skip a cap at any view angle. A fixed linear march
+// would need 61 steps at the Hero front preset (1.4 deg elevation, where the ray
+// crosses 3.4 key pitches inside a 1.6mm slab) and would still be brittle. The
+// small KB_EPS overshoot is what creates a bracket; a pure sphere trace converges
+// from outside and never goes negative. KB_MAXSTEP licenses the nearest-row-only
+// kbPlan, which is not a strict lower bound (max overestimate 1.63mm on the
+// prototype, well inside the 5mm clamp).
+// kind: 0 cap top, 1 cap wall, 2 well floor, 3 deck.
+float kbResolve(vec3 ro, vec3 rd, inout float t, out vec3 nOut, out float kind,
+                out float dPlan, out vec2 gOut) {
+  nOut = vec3(0.0, 1.0, 0.0); kind = 3.0; dPlan = 1e3; gOut = vec2(0.0);
+  // At ~0 elevation the plane intersections run to +-inf and NaNs reach the output.
+  if (rd.y > -0.004) return 0.0;
+  float tTop = (KB_TOP - ro.y) / rd.y;
+  float tBot = (KB_FLOOR - ro.y) / rd.y;
+  // Enter at the slab AABB, not the top plane. Without this the slab reads as a
+  // solid 1mm lip exactly where the bottom row's gaps should show through.
+  float rx = abs(rd.x) < 1e-6 ? 1e-6 : rd.x;
+  float rz = abs(rd.z) < 1e-6 ? 1e-6 : rd.z;
+  float ax0 = (KB_XC - KB_BX - ro.x) / rx, ax1 = (KB_XC + KB_BX - ro.x) / rx;
+  float az0 = (KB_ZC - KB_BZ - ro.z) / rz, az1 = (KB_ZC + KB_BZ - ro.z) / rz;
+  float tIn  = max(min(ax0, ax1), min(az0, az1));
+  float tOut = min(max(ax0, ax1), max(az0, az1));
+  float tc = max(tTop, tIn);
+  float tEnd = min(tBot, tOut);
+  if (tEnd <= tc) return 0.0;
+  float cPlan = max(length(vec2(rd.x, rd.z)), 1e-6);
+
+  vec2 g, cc;
+  float d = kbPlan(vec2(ro.x + rd.x * tc, ro.z + rd.z * tc), g, cc);
+  bool done = d < 0.0;
+  float tHit = done ? tc : tEnd;
+  kind = done ? 0.0 : 2.0;
+  dPlan = d; gOut = g;
+  float tPrev = tc, dPrev = d;
+  // The trace loop only finds a BRACKET. The false-position refinement is
+  // hoisted out of it: nesting the two-step refine inside the trace made D3D
+  // unroll 24 x 3 kbPlan calls instead of 24 x 1 + 2, and link time came in at
+  // 58-68s against a 22s baseline. Hoisted, it is 26 calls per shadeRay, not 120.
+  float tA = tc, tB = tc, dA = d, dB = d;
+  bool bracket = false;
+  for (int i = 0; i < 24; i++) {
+    if (done || tc >= tEnd) break;
+    tPrev = tc; dPrev = d;
+    tc = min(tc + min(d + KB_EPS, KB_MAXSTEP) / cPlan, tEnd);
+    d = kbPlan(vec2(ro.x + rd.x * tc, ro.z + rd.z * tc), g, cc);
+    if (d < 0.0) {
+      tA = tPrev; dA = dPrev; tB = tc; dB = d; bracket = true; done = true;
+    }
+  }
+  if (bracket) {
+    // two false-position steps; kbPlan is near-linear against a flat wall, so
+    // this beats five bisections on both accuracy and cost
+    for (int j = 0; j < 2; j++) {
+      float den = abs(dB - dA) < 1e-9 ? 1e-9 : dB - dA;
+      float tm = clamp(tA - dA * (tB - tA) / den, min(tA, tB), max(tA, tB));
+      float dm = kbPlan(vec2(ro.x + rd.x * tm, ro.z + rd.z * tm), g, cc);
+      if (dm < 0.0) { tB = tm; dB = dm; } else { tA = tm; dA = dm; }
+    }
+    tHit = tB; kind = 1.0; dPlan = dB; gOut = g;
+  }
+  // Left the footprint without meeting a cap: the ray never touched a key, so fall
+  // back to the deck plane. This third outcome is what removes the phantom lip.
+  if (kind > 1.5 && tEnd < tBot - 1e-4) {
+    tHit = (0.0 - ro.y) / rd.y; kind = 3.0;
+  }
+  t = tHit;
+  vec3 ph = ro + rd * tHit;
+  if (kind < 0.5) {
+    // Cap top: flat hit, dished NORMAL only. Tracing the true dish would move the
+    // hit by sag/sin(elev) = 7.3mm in plan at 1.4 deg - far worse than it fixes.
+    vec2 gg, cc2;
+    dPlan = kbPlan(vec2(ph.x, ph.z), gg, cc2);
+    nOut = normalize(vec3(-(ph.x - cc2.x) / KB_DISHR, 1.0, -(ph.z - cc2.y) / KB_DISHR));
+  } else if (kind < 1.5) {
+    nOut = vec3(gOut.x, 0.0, gOut.y);
+  }
+  return 1.0;
+}
+
 // Fraction of the sky a point inside a port can see, as STUDIO_FRAG's cavityVis:
 // without it a 5mm socket is lit like the wall and reads as a bump, not a hole.
 float portVis(vec3 p, float cut, float radial) {
@@ -1461,7 +1655,8 @@ float portVis(vec3 p, float cut, float radial) {
 }
 
 float map(vec3 p) {
-  return min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM), sdLid(p));
+  return min(min(smax(smax(sdBase(p), -sdSideCuts(p), PORT_RIM), -frontCut(p), IND_RIM),
+                 sdLid(p)), sdKbSlab(p));
 }
 
 vec3 normalAt(vec3 p) {
@@ -1586,6 +1781,17 @@ vec4 shadeRay(vec2 fc, out float edge) {
 
   vec3 p = ro + rd * t;
   vec3 n = normalAt(p);
+  // Keyboard heightfield, resolved once here rather than inside map(). Placed
+  // before nw/vw/pxmm so the corrected normal and depth feed the existing
+  // material path unchanged. Skipped on a closest-miss: that t is tBest, a point
+  // on no surface, where kbPlan is meaningless.
+  float kbKind = 3.0, kbD = 1e3, kbOn = 0.0;
+  vec3 kbN = n; vec2 kbG = vec2(0.0);
+  if (hit && sdKbSlab(p) < 0.05) {
+    float tk = t;
+    kbOn = kbResolve(ro, rd, tk, kbN, kbKind, kbD, kbG);
+    if (kbOn > 0.5) { t = tk; p = ro + rd * t; n = kbN; }
+  }
   vec3 nw = uRot * n;
   vec3 vw = uRot * (-rd);
   float pxmm = pxK * t;
@@ -1635,6 +1841,20 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // No darkening in the indent: it is an open scoop, and the prototype's cavity
   // term made it read as a hole where the photo shows it lighter than the face.
   float dInd = frontCut(p);
+  // Cap and groove tone. Antialiased analytically from the plan gradient rather
+  // than by flagging key boundaries as edges: at the grazing presets almost every
+  // keyboard pixel is within 2px of a cap boundary in projection, so flagging them
+  // would push ~40% of the frame through 5 rays x 480 steps. Same footprint
+  // reasoning as aa above.
+  if (kbOn > 0.5 && kbKind < 2.5) {
+    float kw = pxmm / max(abs(dot(normalize(vec2(rd.x, rd.z)), kbG)), 0.15);
+    float capA = smoothstep(-kw, kw, -kbD);
+    metal *= mix(1.0, KB_CAPTONE, capA);
+    // the groove floor and the base of a wall sit in shadow; the depth ramp is
+    // the strongest cue that the caps stand proud
+    float ao = clamp((p.y - KB_FLOOR) / (KB_TOP - KB_FLOOR), 0.0, 1.0);
+    metal *= mix(mix(KB_GAPTONE, 1.0, ao), 1.0, capA);
+  }
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
   metal *= mix(1.0, HAIR_K, seam);
 
@@ -1655,20 +1875,24 @@ vec4 shadeRay(vec2 fc, out float edge) {
 
   return vec4(col, cover);
 }
-
-// Four more rays on a rotated grid where shadeRay flagged an edge, as STUDIO_FRAG.
+// One ray per pixel, supersampled by renderTiled, as STUDIO_FRAG. See the note
+// there for the compile-cost measurements that forced this.
 void main() {
-  float edge, e;
-  vec4 c = shadeRay(gl_FragCoord.xy, edge);
-  if (edge > 0.5) {
-    vec3 acc = c.rgb * c.a;
-    float cov = c.a;
-    vec4 s = shadeRay(gl_FragCoord.xy + vec2( 0.125,  0.375), e); acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2(-0.375,  0.125), e);      acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2(-0.125, -0.375), e);      acc += s.rgb * s.a; cov += s.a;
-    s = shadeRay(gl_FragCoord.xy + vec2( 0.375, -0.125), e);      acc += s.rgb * s.a; cov += s.a;
-    c = vec4(acc / max(cov, 1e-4), cov / 5.0);
-  }
+  // edge is now write-only: with one ray there is nothing to blend, so leaving it
+  // unread lets the compiler drop the whole edge predicate inside shadeRay too.
+  float edge;
+  // Rotated-grid jitter. The 2x2 supersample grid is axis-aligned, which gives it
+  // only two distinct x positions and two distinct y - the worst possible shape for
+  // the vertical and horizontal edges that dominate the Flat preset. Nudging each
+  // subsample a quarter of a virtual pixel off its cell centre puts the four on a
+  // rotated grid, which is what the 4-ray pattern this replaced was for. Same four
+  // samples and the same exact 2:1 box downsample; only where each is taken moves.
+  // Flat's axis-aligned edge error, 0-255 against a 16-sample reference: old 5-ray
+  // 3.86, plain 2x 4.60, jittered 1.08.
+  vec2 fc = gl_FragCoord.xy + uOrigin;
+  vec2 jit = vec2(mod(floor(fc.y), 2.0) < 0.5 ? -0.25 : 0.25,
+                  mod(floor(fc.x), 2.0) < 0.5 ?  0.25 : -0.25);
+  vec4 c = shadeRay(fc + jit * uJit, edge);
   if (c.a <= 0.0) discard;
   gl_FragColor = c;
 }
@@ -2099,6 +2323,74 @@ let deviceBounds = null;
 let screenQuad = null;
 let wantQuad = false;
 
+// --- supersampled, tiled device pass -----------------------------------------
+// The ray-marched shaders take one ray per pixel; the antialiasing comes from
+// rendering at SS x and box-downsampling. See the note above STUDIO_FRAG's main
+// for why (compile cost, not render cost).
+//
+// It is tiled because the whole virtual frame will not fit and must not be drawn
+// in one call. A 4096 export at 2x wants an 8192 drawing buffer, over the common
+// 4096 MAX_TEXTURE_SIZE floor, in a single ~2s draw - past Windows' 2s TDR
+// timeout, which kills the context. Tiled, the largest draw measured 116ms.
+const SS = 2;
+// Lowered to 1 for draft frames while a control is being dragged; see drawDraft.
+let ssNow = SS;
+
+let tileMax = 0;
+function tileLimit() {
+  if (tileMax) return tileMax;
+  // Nothing in this file checked the GL limits before. An oversized drawing
+  // buffer is silently clamped by the browser and then renders at the wrong
+  // scale rather than throwing, so probe, then confirm the buffer we asked for
+  // is the buffer we got.
+  const lim = [gl.getParameter(gl.MAX_TEXTURE_SIZE),
+               gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+               (gl.getParameter(gl.MAX_VIEWPORT_DIMS) || [0])[0]].filter(v => v > 0);
+  tileMax = Math.max(256, Math.min(2048, ...lim));
+  glCanvas.width = tileMax; glCanvas.height = tileMax;
+  const got = Math.min(gl.drawingBufferWidth, gl.drawingBufferHeight);
+  if (got > 0 && got < tileMax) tileMax = Math.max(256, got);
+  return tileMax;
+}
+
+// Draw `prog` over an SS-supersampled W x H frame and return an output-sized
+// canvas. setUniforms(VW, VH, ox, oy) sets everything resolution-dependent: uRes
+// must be the VIRTUAL size so the shaders' aa/pxmm pixel-footprint terms scale
+// with the supersampled grid, and uOrigin restores the absolute position, since
+// gl_FragCoord is tile-local.
+// Verified byte-identical to an untiled render at 1, 6, 24 and 80 tiles,
+// including partial edge tiles.
+function renderTiled(W, H, ss, setUniforms) {
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const c2 = out.getContext('2d');
+  // Required. With smoothing off drawImage point-samples and the downsample is
+  // simply wrong; with it on it box-averages in premultiplied space, which is
+  // what straight-alpha output needs to avoid colour bleeding out of the
+  // near-transparent pixels along the silhouette.
+  c2.imageSmoothingEnabled = true;
+  c2.imageSmoothingQuality = 'high';
+  const VW = W * ss, VH = H * ss;
+  // whole output pixels per tile, so no tile boundary lands mid-pixel
+  const step = Math.max(ss, Math.floor(tileLimit() / ss) * ss);
+  for (let vy = 0; vy < VH; vy += step) {
+    const th = Math.min(step, VH - vy);
+    for (let vx = 0; vx < VW; vx += step) {
+      const tw = Math.min(step, VW - vx);
+      glCanvas.width = tw; glCanvas.height = th;
+      gl.viewport(0, 0, tw, th);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      setUniforms(VW, VH, vx, vy);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      // GL rows run bottom-up, the canvas top-down, so a tile whose bottom sits
+      // at virtual row vy lands this far down the destination.
+      c2.drawImage(glCanvas, 0, 0, tw, th, vx / ss, (VH - vy - th) / ss, tw / ss, th / ss);
+    }
+  }
+  return out;
+}
+
 function boundsFromLayer(src, W, H) {
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
@@ -2445,34 +2737,33 @@ function renderStudio(canvas, W, H) {
   const half = Math.asin(Math.min(radius / camZ, 0.99));
   const tanHalf = Math.tan(half / (state.zoom / 100));
 
-  glCanvas.width = W; glCanvas.height = H;
-  gl.viewport(0, 0, W, H);
-  gl.clearColor(0, 0, 0, 0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
   gl.useProgram(studioProgram);
   gl.disable(gl.BLEND);
   const u = n => gl.getUniformLocation(studioProgram, n);
   const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
-  gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
-  gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
-  gl.uniform2f(u('uRes'), W, H);
-  gl.uniform1f(u('uCamZ'), camZ);
-  gl.uniform1f(u('uTanHalf'), tanHalf);
-  gl.uniform1f(u('uAspect'), W / H);
-  const fin = FINISHES[state.finish] || FINISHES.Silver;
-  gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
-  gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
-  gl.uniform1f(u('uSrcAspect'), srcAspect);
-  gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
-  setImgUniforms(u, STUDIO_SH / STUDIO_SW);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.uniform1i(u('uTex'), 0);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  const scratch = document.createElement('canvas');
-  scratch.width = W; scratch.height = H;
-  scratch.getContext('2d').drawImage(glCanvas, 0, 0);
+  // renderTiled drives the draw; everything resolution-dependent is set per tile
+  // from the VIRTUAL frame size, never from W/H.
+  const scratch = renderTiled(W, H, ssNow, (VW, VH, ox, oy) => {
+    gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
+    gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
+    gl.uniform2f(u('uRes'), VW, VH);
+    gl.uniform2f(u('uOrigin'), ox, oy);
+    gl.uniform1f(u('uJit'), ssNow === 2 ? 1.0 : 0.0);
+    gl.uniform1f(u('uCamZ'), camZ);
+    gl.uniform1f(u('uTanHalf'), tanHalf);
+    gl.uniform1f(u('uAspect'), VW / VH);
+    const fin = FINISHES[state.finish] || FINISHES.Silver;
+    gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+    gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
+    gl.uniform1f(u('uSrcAspect'), srcAspect);
+    gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
+    setImgUniforms(u, STUDIO_SH / STUDIO_SW);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(u('uTex'), 0);
+  });
+  // scratch is already at output size, so this still scans W*H, not the
+  // supersampled frame.
   deviceBounds = boundsFromLayer(scratch, W, H);
 
   // The inverse of the shader's ray setup, so anything projected with it lands
@@ -2533,38 +2824,34 @@ function renderLaptop(canvas, W, H) {
   const half = Math.asin(Math.min(radius / camZ, 0.99));
   const tanHalf = Math.tan(half / (state.zoom / 100));
 
-  glCanvas.width = W; glCanvas.height = H;
-  gl.viewport(0, 0, W, H);
-  gl.clearColor(0, 0, 0, 0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
   gl.useProgram(laptopProgram);
   gl.disable(gl.BLEND);
   const u = n => gl.getUniformLocation(laptopProgram, n);
   const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
-  gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
-  gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
-  gl.uniform2f(u('uRes'), W, H);
-  gl.uniform1f(u('uCamZ'), camZ);
-  gl.uniform1f(u('uTanHalf'), tanHalf);
-  gl.uniform1f(u('uAspect'), W / H);
-  gl.uniform1f(u('uRadius'), radius);
-  gl.uniform3f(u('uCenter'), center.x, center.y, center.z);
   const la = lid * Math.PI / 180;
-  gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
-  const fin = LAPTOP_FINISHES[state.laptopFinish] || LAPTOP_FINISHES['Space Black'];
-  gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
-  gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
-  gl.uniform1f(u('uSrcAspect'), srcAspect);
-  gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
-  setImgUniforms(u, LAPTOP.DH / LAPTOP.DW);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.uniform1i(u('uTex'), 0);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  const scratch = document.createElement('canvas');
-  scratch.width = W; scratch.height = H;
-  scratch.getContext('2d').drawImage(glCanvas, 0, 0);
+  // As renderStudio: uRes is the VIRTUAL frame, uOrigin the tile's place in it.
+  const scratch = renderTiled(W, H, ssNow, (VW, VH, ox, oy) => {
+    gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
+    gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
+    gl.uniform2f(u('uRes'), VW, VH);
+    gl.uniform2f(u('uOrigin'), ox, oy);
+    gl.uniform1f(u('uJit'), ssNow === 2 ? 1.0 : 0.0);
+    gl.uniform1f(u('uCamZ'), camZ);
+    gl.uniform1f(u('uTanHalf'), tanHalf);
+    gl.uniform1f(u('uAspect'), VW / VH);
+    gl.uniform1f(u('uRadius'), radius);
+    gl.uniform3f(u('uCenter'), center.x, center.y, center.z);
+    gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
+    const fin = LAPTOP_FINISHES[state.laptopFinish] || LAPTOP_FINISHES['Space Black'];
+    gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+    gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
+    gl.uniform1f(u('uSrcAspect'), srcAspect);
+    gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
+    setImgUniforms(u, LAPTOP.DH / LAPTOP.DW);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(u('uTex'), 0);
+  });
   deviceBounds = boundsFromLayer(scratch, W, H);
 
   // World is the object rotated about the pivot, matching the shader's
@@ -4092,17 +4379,27 @@ function syncSliders() {
   });
   syncDials();
 }
+// Supersampling makes a preview frame about 2.3x dearer, and every input event
+// re-renders synchronously. Draw drafts at 1x while a control is moving, then
+// redraw at full quality once it settles, so dragging stays responsive.
+let settleTimer = null;
+function drawDraft() {
+  ssNow = 1;
+  draw();
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { ssNow = SS; draw(); }, 140);
+}
 SLIDERS.forEach(([id, out, unit]) => {
   document.getElementById(id).addEventListener('input', e => {
     state[id] = +e.target.value;
     setVal(out, state[id], unit);
-    draw();
+    drawDraft();
   });
 });
 syncSliders();
 
 ['body', 'bg'].forEach(id => {
-  document.getElementById(id).addEventListener('input', e => { state[id] = e.target.value; draw(); });
+  document.getElementById(id).addEventListener('input', e => { state[id] = e.target.value; drawDraft(); });
 });
 
 ['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
@@ -4661,6 +4958,9 @@ function exportSize(scale, aspect) {
 }
 
 goBtn.addEventListener('click', () => {
+  // never export a draft frame, whatever a drag left behind
+  clearTimeout(settleTimer);
+  ssNow = SS;
   const out = document.createElement('canvas');
   // scale is the multiplier actually used, which is not state.scale when the
   // request had to be cut down. code.js divides the pixel size by it to size the
