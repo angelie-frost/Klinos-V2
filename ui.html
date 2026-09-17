@@ -1484,6 +1484,26 @@ const float KB_EPS = 0.20, KB_MAXSTEP = 5.0;
 const float KB_DISHR = 315.3, KB_DISH = 0.10;
 const float KB_CAPTONE = 0.77, KB_GAPTONE = 0.40;  // measured against the deck
 
+// --- trackpad and speaker grilles --------------------------------------------
+// Painted on the deck's top face, not geometry: both are flush with it, so they
+// are the notch case, not the port case, and add nothing to map().
+// MEASURED on references/macbook-keyboard-topdown.png at 1.262px/mm (the deck
+// silhouette, 449px for 355.7mm), so +-0.8mm throughout. Trackpad 159.5 wide and
+// 0.3 left of centre; its side grooves run from z 19.9 (20.2 used) to 118.0, which
+// leaves 2.3mm before the front indent's lip. The grilles are the darker strips
+// beside the keyboard, from the well lip at 141.2 to 1.15mm inside the deck edge
+// and z -95.8 to 11.2; where the photo cannot resolve holes they read 0.90 of
+// the deck. Tones are against the deck on the same photo row.
+// ESTIMATES: trackpad corner radius, groove width and hole radius - none of them
+// resolve at this scale.
+const float TP_HW = 79.75, TP_CX = -0.30, TP_Z0 = 20.2, TP_Z1 = 118.0, TP_R = 6.0;
+const float TP_TONE = 1.04, TP_GROOVE = 0.30, TP_GROOVE_K = 0.42;
+const float GR_X0 = 141.2, GR_X1 = 176.7, GR_Z0 = -95.8, GR_Z1 = 11.2;
+const float GR_PITCH = 1.00, GR_R = 0.30, GR_MEAN = 0.90;
+// Hole tone that gives the resolved lattice the same mean as the unresolved band,
+// so the fade in shadeRay shifts no brightness. Holes cover pi R^2 / P^2 = 28.3%.
+const float GR_HOLE = 1.0 - (1.0 - GR_MEAN) / (3.14159265 * GR_R * GR_R / (GR_PITCH * GR_PITCH));
+
 // Row centres are looked up EXACTLY, not taken from the uniform fit. Checked on
 // the prototype over 400k samples: the fitted centre disagrees with a true
 // 77-shape min() on 0.84% of samples, the exact lookup on 0.0000%.
@@ -1855,6 +1875,32 @@ vec4 shadeRay(vec2 fc, out float edge) {
     float ao = clamp((p.y - KB_FLOOR) / (KB_TOP - KB_FLOOR), 0.0, 1.0);
     metal *= mix(mix(KB_GAPTONE, 1.0, ao), 1.0, capA);
   }
+  // Trackpad and grilles, painted on the deck top. A tilted pixel covers more of
+  // the deck than pxmm; bounded edge-on, as aa above.
+  float deckTop = (1.0 - onLid) * smoothstep(0.3, 0.7, n.y) * step(abs(p.y), 0.5);
+  float daa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
+  float dTp = sdRRect(vec2(p.x - TP_CX, p.z - (TP_Z0 + TP_Z1) * 0.5),
+                      vec2(TP_HW, (TP_Z1 - TP_Z0) * 0.5), TP_R);
+  metal *= mix(1.0, TP_TONE, deckTop * (1.0 - smoothstep(-daa, daa, dTp)));
+  // The groove's contrast scales with its share of the footprint, so a sub-pixel
+  // groove darkens by its coverage instead of drawing a pixel-wide line. Exact on
+  // the prototype once daa reaches half the groove width.
+  float tpW = TP_GROOVE * 0.5 + daa;
+  float groove = (1.0 - smoothstep(0.0, tpW, abs(dTp))) * min(TP_GROOVE / tpW, 1.0);
+  metal *= mix(1.0, TP_GROOVE_K, deckTop * groove);
+  // Grilles. The 1mm lattice is resolved while the footprint is under a quarter
+  // pitch and has faded to its mean by half a pitch, the Nyquist limit. On the
+  // prototype over 0.1-1.5mm footprints and 0-75 deg of tilt this added no
+  // low-frequency energy against a 16x16 reference and held the mean at 0.88-0.90.
+  float ax = abs(p.x);
+  float grBand = deckTop
+    * smoothstep(GR_X0 - daa, GR_X0 + daa, ax) * (1.0 - smoothstep(GR_X1 - daa, GR_X1 + daa, ax))
+    * smoothstep(GR_Z0 - daa, GR_Z0 + daa, p.z) * (1.0 - smoothstep(GR_Z1 - daa, GR_Z1 + daa, p.z));
+  vec2 grQ = mod(p.xz + GR_PITCH * 0.5, GR_PITCH) - GR_PITCH * 0.5;
+  float hole = 1.0 - smoothstep(GR_R - daa, GR_R + daa, length(grQ));
+  float perf = mix(GR_MEAN, mix(1.0, GR_HOLE, hole),
+                   1.0 - smoothstep(0.25, 0.5, daa / GR_PITCH));
+  metal *= mix(1.0, perf, grBand);
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
   metal *= mix(1.0, HAIR_K, seam);
 
