@@ -1644,7 +1644,17 @@ float kbResolve(vec3 ro, vec3 rd, inout float t, out vec3 nOut, out float kind,
       float dm = kbPlan(vec2(ro.x + rd.x * tm, ro.z + rd.z * tm), g, cc);
       if (dm < 0.0) { tB = tm; dB = dm; } else { tA = tm; dA = dm; }
     }
-    tHit = tB; kind = 1.0; dPlan = dB; gOut = g;
+    // The wall IS the plan boundary, so land the hit on the zero crossing and
+    // report zero distance. Reporting tB/dB - the bracket's inner end after only
+    // two false-position steps - fed the solver's residual into capA and the AO
+    // ramp as if it were geometry. Measured at 3 deg elevation: residual 0 to
+    // -0.29mm against a 0.49mm AA half-width, so capA came out mean 0.546 sd
+    // 0.107, which reads as grain along the inter-row gaps, where kbPlan's
+    // nearest-row-only step is loosest (overestimates by up to 1.55mm there, so
+    // the brackets are widest and most variable). No extra kbPlan call.
+    float den2 = abs(dB - dA) < 1e-9 ? 1e-9 : dB - dA;
+    tHit = clamp(tA - dA * (tB - tA) / den2, min(tA, tB), max(tA, tB));
+    kind = 1.0; dPlan = 0.0; gOut = g;
   }
   // Left the footprint without meeting a cap: the ray never touched a key, so fall
   // back to the deck plane. This third outcome is what removes the phantom lip.
@@ -1807,7 +1817,14 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // on no surface, where kbPlan is meaningless.
   float kbKind = 3.0, kbD = 1e3, kbOn = 0.0;
   vec3 kbN = n; vec2 kbG = vec2(0.0);
-  if (hit && sdKbSlab(p) < 0.05) {
+  // Gate scales with the pixel footprint. The march accepts a hit at 0.05 px and
+  // a grazing one at 0.5 px (both pixel-relative, above), so a fixed 0.05mm here
+  // rejected rays the march had already accepted as soon as pxmm passed 0.1 - the
+  // whole keyboard then rendered as the bare 1mm slab. Measured on the prototype:
+  // at pxmm 1.64 every row but the last skipped the resolve entirely, at 3.29 all
+  // six did. kbResolve re-derives the hit from ro/rd and returns 0 on a miss, so
+  // widening this only costs the pixels near the slab.
+  if (hit && sdKbSlab(p) < max(0.05, 0.5 * pxK * t)) {
     float tk = t;
     kbOn = kbResolve(ro, rd, tk, kbN, kbKind, kbD, kbG);
     if (kbOn > 0.5) { t = tk; p = ro + rd * t; n = kbN; }
