@@ -1331,8 +1331,24 @@ const float AZ = -DEP * 0.5 + HE;
 const float AY = GAP - HE;
 const float S_DISP = LL - HE - TOP_BEZ - DH * 0.5;   // display centre along the lid
 
-const float ROUGH_BODY = 0.38;
-const float COAT_F0 = 0.05, COAT_MIX = 0.55, BODY_K = 0.22;
+// Satin anodised aluminium. ROUGH_BODY is high because it is now doing three
+// jobs, not two: the envSpec blur radius, the softbox edge softness, and the
+// masking term in envBRDF below. That third one is what stops the grazing
+// specular washing both finishes to the same grey, and it scales with
+// roughness, so 0.38 could not deliver it. Fitted offline together with BODY_K
+// and the two tonemap constants against references/macbook-side.png and
+// references/macbook-spaceblack-open.png; see the note above envBRDF.
+// COAT_F0 and COAT_MIX are gone: the coat split they described is replaced by
+// the split-sum model, which needs no neutral-coat fudge to keep a dark finish
+// catching the light. STUDIO_FRAG (the phone) still has its own pair.
+const float ROUGH_BODY = 0.55;
+const float BODY_K = 0.52;
+// Body tonemap. BODY_EXPOSURE is fitted to hold Silver's calibrated level:
+// measured on the Hero front wall it moves 188 -> 180 of 255, about -4%, while
+// Space Black drops 84 -> 57, which is the whole point. BODY_WHITE is the
+// Reinhard white point, set from the brightest reflection the four softboxes
+// can produce so that highlight lands just under the clip (headroom 1.16).
+const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
 const float HAIR_W = 0.10, HAIR_K = 0.30;
 
 float sdRRect(vec2 p, vec2 half_, float r) {
@@ -1485,19 +1501,26 @@ const float KB_EPS = 0.20, KB_MAXSTEP = 5.0;
 const float KB_DISHR = 315.3, KB_DISH = 0.10;
 const float KB_CAPTONE = 0.77, KB_GAPTONE = 0.40;  // measured against the deck
 // Keycaps and the well between them are black plastic on both finishes, as on
-// the real machine, so the keyboard takes Space Black's coat whatever the
+// the real machine, so the keyboard takes Space Black's material whatever the
 // chassis. The two tones above were measured on that finish. Must match
-// LAPTOP_FINISHES['Space Black'] in JS.
+// LAPTOP_FINISHES['Space Black'] in JS - nothing enforces it, and this value
+// now feeds three materials (caps, well, and the legends' reflK), so a stale
+// copy desyncs all three at once.
 const vec3 KB_FIN = vec3(0.040, 0.040, 0.043);
 // The legend map covers exactly the cap bounding box, so plan mm map straight
 // to uv; tools/make_legends.py draws in the same frame.
 const vec2 KB_LEG_O = vec2(KB_XC - KB_BX, KB_ZC - KB_BZ);
 const vec2 KB_LEG_S = vec2(0.5 / KB_BX, 0.5 / KB_BZ);
-// Legend print as an albedo in the caps' coat model, so it is lit like the cap
-// it sits on: light-grey print, near the top of plausible paint. The photo's
-// legend/cap ratio (~9x) is not reachable here - this environment also lights
-// the cap, by Fresnel at grazing angles, and that is the chassis coat model's
-// known limitation (see LAPTOP_FINISHES), not something the print can fix.
+// Legend print as an albedo in the caps' material, so it is lit like the cap it
+// sits on: light-grey print, near the top of plausible paint. An ALBEDO, never
+// an F0 - put 0.85 in the F0 slot and the legends render as chrome.
+// The photo's legend/cap ratio (~9x) is still not reached, because this
+// environment lights the cap too, but the grazing collapse that made legends
+// unreadable at Front and Three-quarter is gone: under the old plain-Schlick
+// coat both cap and print went to specR at grazing and the print vanished.
+// Measured on a GPU render as p98/p50 over the keycap band, Space Black:
+// Front 1.09 -> 1.41, Three-quarter 1.11 -> 1.48/1.52, From above 2.18 -> 2.27.
+// See envBRDF.
 const vec3 KB_LEG_ALB = vec3(0.85);
 
 // --- trackpad and speaker grilles --------------------------------------------
@@ -1767,8 +1790,51 @@ vec3 fitUV(vec2 uv, float sa, float ia, float mode, vec2 pan, float zm) {
   return vec3(t, bar);
 }
 
+// Kept for the display glass below, which is a real dielectric coat and is
+// correct as plain Schlick. The chassis no longer uses it.
 vec3 fres(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
 vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
+
+// Split-sum environment BRDF (Karis' analytic fit to the DFG term), returning
+// the (A, B) pair so that reflectance is F0 * A + B.
+//
+// This replaces plain Schlick on the chassis because Schlick has no
+// masking-shadowing term: it sends F to 1 at grazing for EVERY f0, so
+// specR * F collapsed to the bare environment reflection -- identical for both
+// finishes -- while the (1 - F) gate simultaneously zeroed the albedo term,
+// the only place the finish colour had any range. That is why Silver and Space
+// Black were within 1.05-1.27x of each other at Front, Three-quarter and Side,
+// and why matte keycaps changed nothing: cap and legend shared the same Fk and
+// collapsed together.
+//
+// A carries the F0 dependence and B is an achromatic offset. B is what keeps a
+// dark finish catching the light at grazing, which is exactly what the old
+// neutral-coat blend (COAT_F0/COAT_MIX) was added to fake -- so this is not the
+// "metal f0 dims its own highlights" case that STUDIO_FRAG's note rejects.
+// Branch-free on purpose: min() is a select, and a branch in the shading tail
+// invites the ANGLE/D3D11 float divergence documented above smax.
+vec2 envBRDF(float rough, float ndv) {
+  vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+  vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+  vec4 r = rough * c0 + c1;
+  float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+  return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Body tonemap: exposure plus an extended Reinhard with a finite white point.
+// Separate from encode() and used ONLY on the chassis, never on the glass --
+// encode() still tones the lid reflection at the composite below, so the
+// design's own colours and SCREEN_FRAG parity are untouched.
+//
+// Plain c/(1+c) has no exposure control, so the bright finish sat in its
+// saturating tail: at From above the material produced 10.9x in linear light
+// and only 2.69x survived to the screen. The white point is what buys the
+// headroom back; the exposure alone would only compress harder.
+vec3 encodeBody(vec3 c) {
+  vec3 x = c * BODY_EXPOSURE;
+  return pow(clamp(x * (1.0 + x / (BODY_WHITE * BODY_WHITE)) / (1.0 + x), 0.0, 1.0),
+             vec3(1.0 / 2.2));
+}
 
 // The laptop notch in display millimetres, same construction as STUDIO_FRAG's
 // sdNotch including its fillet overlap (a fillet butted against the box leaves a
@@ -1881,9 +1947,12 @@ vec4 shadeRay(vec2 fc, out float edge) {
 
   vec3 r = reflect(-vw, nw);
   float ndv = clamp(dot(nw, vw), 0.0, 1.0);
-  vec3 F = fres(vec3(COAT_F0) + (uFinish - vec3(COAT_F0)) * COAT_MIX, ndv);
+  // uFinish reads as F0 here. ab is computed once and reused by the keycaps and
+  // the legends below, so the whole material path costs one envBRDF, not three.
+  vec2 ab = envBRDF(ROUGH_BODY, ndv);
+  vec3 bodyF = uFinish * ab.x + ab.y;
   vec3 specR = envSpec(r, ROUGH_BODY), diffN = envSpec(nw, 0.95);
-  vec3 metal = specR * F + diffN * uFinish * (1.0 - F) * BODY_K;
+  vec3 metal = specR * bodyF + diffN * uFinish * max(vec3(0.0), 1.0 - bodyF) * BODY_K;
   // The black hinge cover along the base's rear edge, the dark band beside the
   // lid in the side photo.
   float hingeA = (1.0 - onLid) * step(p.z, -DEP * 0.5 + HINGE_BAND) * smoothstep(0.3, 0.7, n.y);
@@ -1900,12 +1969,15 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // would push ~40% of the frame through 5 rays x 480 steps. Same footprint
   // reasoning as aa above.
   // Black plastic on both finishes (see KB_FIN). Reuses the two environment
-  // lookups above, so no extra envSpec; on Space Black it reproduces the chassis
-  // coat exactly. Fk and capA live out here because the legends reuse them.
-  vec3 Fk = fres(vec3(COAT_F0) + (KB_FIN - vec3(COAT_F0)) * COAT_MIX, ndv);
+  // lookups above AND the chassis's ab, so no extra envSpec and no extra
+  // envBRDF; on Space Black it reproduces the chassis material exactly, which
+  // is a structural equality with the metal line above -- change one and the
+  // deck and the keys end up on two different BRDFs. reflK and capA live out
+  // here because the legends reuse them.
+  vec3 reflK = KB_FIN * ab.x + ab.y;
   float capA = 0.0;
   if (kbOn > 0.5 && kbKind < 2.5) {
-    metal = specR * Fk + diffN * KB_FIN * (1.0 - Fk) * BODY_K;
+    metal = specR * reflK + diffN * KB_FIN * max(vec3(0.0), 1.0 - reflK) * BODY_K;
     float kw = pxmm / max(abs(dot(normalize(vec2(rd.x, rd.z)), kbG)), 0.15);
     capA = smoothstep(-kw, kw, -kbD);
     metal *= mix(1.0, KB_CAPTONE, capA);
@@ -1946,7 +2018,10 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // mipmaps and anisotropy do the minification, so distant legends settle to
   // their mean instead of shimmering. Measured: no compile-time cost.
   float leg = texture2D(uLegend, (p.xz - KB_LEG_O) * KB_LEG_S).r;
-  vec3 legMat = specR * Fk + diffN * KB_LEG_ALB * (1.0 - Fk) * BODY_K;
+  // KB_LEG_ALB stays in the ALBEDO slot. It is paint, not metal: put 0.85 into
+  // the F0 slot instead and the legends render as chrome. The print takes the
+  // cap's own reflK, so it is lit like the cap it sits on, as before.
+  vec3 legMat = specR * reflK + diffN * KB_LEG_ALB * max(vec3(0.0), 1.0 - reflK) * BODY_K;
   metal = mix(metal, legMat, leg * kbOn * step(kbKind, 0.5) * capA);
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFace;
   metal *= mix(1.0, HAIR_K, seam);
@@ -1954,7 +2029,7 @@ vec4 shadeRay(vec2 fc, out float edge) {
   vec3 refl = environment(r, 0.045);
   vec3 f = fres(vec3(0.085), ndv);
   vec3 glass = design * (1.0 - f) + encode(refl) * f;
-  vec3 col = mix(encode(metal), glass, glassA);
+  vec3 col = mix(encodeBody(metal), glass, glassA);
 
   // Where one ray per pixel cannot resolve the result: where base and lid meet,
   // the glass and display outlines, and the rounded slab edges, which are a few
@@ -2807,12 +2882,23 @@ const FINISHES = {
 // the MacBook's is neutral. apple.com gives names only, so these are calibrated on
 // references/macbook-side.png, where a Space Black and a Silver machine share one
 // light: side-wall tint within 1-2% (photo R/G 1.00, B/G 1.02 for both).
-// KNOWN LIMITATION, for a later material-model change (no workaround here): in the
-// photo Silver is 4.8x brighter than Space Black, but the coat model reaches only
-// about 2.2x even at these extreme values (the phone's Silver/Midnight is 1.6-1.8x).
-// The Space Black deck is not black in the references either: it is brighter than
-// the front face, 1.55x in references/macbook-spaceblack-open.png against 1.31x in
-// the Hero front render, so the deck's grazing brightness is broadly right.
+// These are read as F0 by LAPTOP_FRAG's split-sum material (see envBRDF there).
+// They were NOT retuned when that model landed, so their ratio is unchanged at
+// 21.6x and the values below are still the ones calibrated against the photo.
+//
+// REMAINING GAP: in references/macbook-side.png Silver is 4.8x brighter than
+// Space Black. Measured on GPU renders, the material model now reaches 3.13x on
+// that same side-wall geometry, up from 2.26x, and the grazing washout that
+// used to drop the deck to 1.08-1.34x at Front, Three-quarter and Side is gone
+// (2.10-2.26x now). Closing the rest needs ~34x in linear light and the pair
+// below only encodes 21.6x, so it is a recalibration of these two arrays, not a
+// model change. If that is done, KB_FIN in LAPTOP_FRAG and the tiles below have
+// to move with it, and BACKDROP_FRAG's reflection strength keys off the finish
+// luminance.
+//
+// The Space Black deck is not black in the references either: it is brighter
+// than the front face, 1.55x in references/macbook-spaceblack-open.png. The old
+// coat model rendered that at 2.98x at Front; this one measures 1.67x.
 const LAPTOP_FINISHES = {
   'Space Black': [0.040, 0.040, 0.043],
   Silver: [0.864, 0.852, 0.918]
