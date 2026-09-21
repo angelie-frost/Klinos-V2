@@ -321,7 +321,8 @@
   <div class="seg" id="mode"></div>
   <div id="studiobox" style="display:none">
     <div class="sub">Device</div>
-    <div class="seg" id="studiodevice"></div>
+    <button class="select anglebtn" id="devicebtn" aria-expanded="false"><canvas id="devicethumb" width="56" height="56"></canvas><span id="devicename"></span><span class="chev"></span></button>
+    <div class="anglemenu" id="devicemenu" hidden></div>
     <div class="sub">Finish</div>
     <div class="chips" id="finishes"></div>
   </div>
@@ -369,6 +370,8 @@
   <div class="anglemenu" id="presets" hidden></div>
   <div class="dials" id="dials"></div>
   <div class="slider" id="lidrow" style="display:none;margin:6px 0 4px"><span class="name">Lid angle</span><input type="range" id="lid" min="0" max="135" value="110"><span class="val" id="lido"></span></div>
+  <div class="switchrow" id="orientrow" style="display:none;margin:6px 0 4px"><label for="tabletLandscape">Landscape</label>
+    <span class="switch"><input type="checkbox" id="tabletLandscape"><span class="track"></span><span class="knob"></span></span></div>
   <div class="switchrow" id="adjustrow" style="margin-top:4px"><label for="adjust">Adjust</label>
     <span class="switch"><input type="checkbox" id="adjust"><span class="track"></span><span class="knob"></span></span></div>
   <div id="adjustbox" style="padding-top:12px">
@@ -2066,6 +2069,380 @@ void main() {
 }
 `;
 
+// The Studio tablet: an 11-inch iPad Pro (M4). A rigid rounded-rect slab with a
+// rear camera bump - no hinge, so no lid frame and no second silhouette.
+//
+// Its own program rather than a branch in STUDIO_FRAG, for the same reason the
+// laptop got one: the phone's body dimensions are compile-time constants and its
+// march bounds are fixed millimetres tuned to a 147mm body, and a 249.7mm tablet
+// does not fit either. Extending STUDIO_FRAG would also pay the tablet's geometry
+// on every phone pixel, which is where the inlining cost documented above main()
+// actually lands.
+//
+// Geometry is MEASURED. The references are three Apple product shots, and the
+// numbers were taken offline before any of this was written:
+//   body 177.5 x 249.7 x 5.3        published, Wi-Fi model
+//   corner radius 15.3              circle fit on the front-on silhouette, rms 0.15
+//   edge chamfer 0.65               where the side reaches full depth in profile
+//   camera housing 29.50 square     along the length in profile; square is an ESTIMATE
+//   housing 1.78 proud              in profile, against the back face
+//   housing 5.52 below the top      in profile
+//   housing 8.20 in from the side   from the 3/4 back view
+// The display is not measured but derived: 2420x1668 at 264 ppi is 160.5 x 232.8mm,
+// which inside the published body leaves a bezel of 8.51 x 8.43 - uniform to 0.08mm,
+// so the two published figures corroborate each other and the screen needs no photo.
+const TABLET_FRAG = `
+precision highp float;
+
+uniform vec2  uRes;
+uniform vec2  uOrigin;   // tile origin in the virtual frame
+uniform float uJit;      // 1 = rotated-grid jitter (2x supersampling), 0 = off
+uniform mat3  uRot;      // object -> world, for normals
+uniform mat3  uRotT;     // world -> object, for rays
+uniform float uCamZ, uTanHalf, uAspect;
+uniform float uRadius;   // bounding-sphere radius about the origin; bounds the march
+uniform float uLandscape;// 1 = the body is turned 90 degrees; swaps the display uv
+uniform float uBandTone; // antenna band vs the rail, per finish - see TABLET_BAND
+uniform vec3  uFinish;
+uniform sampler2D uTex;
+uniform float uHasTex;
+uniform float uSrcAspect, uFitMode;
+uniform vec2  uImgPan;
+uniform float uImgZoom;
+
+const float W = 177.5, H = 249.7, D = 5.3;
+const float CORNER = 15.3, EDGE = 0.65;
+// Display half-extents, from 2420x1668 at 264 ppi. SCREEN_R is CORNER less the
+// bezel, so the display corners stay concentric with the body's.
+const float SW = 80.25, SH = 116.40, SCREEN_R = 6.80;
+const float LIP_W = 0.90;                    // ESTIMATE: aluminium showing round the glass
+const float HAIR_W = 0.10, HAIR_K = 0.30;    // dark gap where glass meets the band
+
+// Same material as the laptop chassis, deliberately unchanged. The iPad's own
+// side profile puts Silver against Space Black at 3.07-3.17x under one light and
+// this model measured 3.13x on the laptop's equivalent wall, so it arrives
+// already calibrated. uFinish is F0 here, as it is there - NOT the phone's
+// anodise-base tint, which is a different quantity in the same-shaped array.
+const float ROUGH_BODY = 0.55;
+const float BODY_K = 0.52;
+const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
+
+// Camera bump. Parameterised by how far it stands PROUD of the back, because
+// that is what the side profile measures; the slab is thicker than that and the
+// surplus sinks into the body so the union has no knife edge. Copying the
+// phone's total-height-plus-sink form instead put the housing 0.35mm shallow.
+const float BUMP_HW = 14.75, BUMP_HH = 14.75;
+const float BUMP_PROUD = 1.78, BUMP_T = 2.38;
+const float BUMP_R = 6.90;                   // ESTIMATE, the phone's bump ratio scaled
+const float BUMP_E = 1.00;                   // shoulder, measured off the profile ramp
+const float BUMP_OX = 65.80, BUMP_OY = 104.58;
+const float BUMP_CZ = -(D * 0.5 + BUMP_PROUD - BUMP_T * 0.5);
+
+// Front camera, centred on the LONG edge as on the real M4 - mid-side in
+// portrait, top-centre once uLandscape turns the body. Mid-bezel, so 4.25 in.
+const float CAM_X = -(W * 0.5 - 4.25), CAM_Y = 0.0;
+
+// Antenna band across the side rails. MEASURED on 3.png at the established
+// 40.94 px/mm: 13.25 to 15.18 mm below the top edge, so 1.93 mm wide, and the
+// two finishes agree on its position to 0.02 mm.
+//
+// The datum matters here. "Below the top edge" is measured from the body's true
+// top, which in that profile is where the silhouette widens past the top
+// button's nub - NOT from where it reaches full depth, which is 0.65 mm lower
+// because of the EDGE chamfer. Taking the latter put the band 0.67 mm high.
+//
+// Rail only: a vertical profile down the back panel in 2.png is a smooth
+// gradient with no step, so the band does not wrap onto it. The y slab sits
+// just inside the corner arc (which begins at 109.55), but only about 4 degrees
+// in, so the rail normal is still within 1% of sideways and the mask holds.
+// ASSUMED symmetric - the photo shows one rail, and abs(n.x) covers both.
+// Whether it continues across the short top edge is unresolved: the band is
+// 13 mm below it and nothing in the reference speaks to it, so it does not.
+const float BAND_Y = 110.63, BAND_HW = 0.965;
+
+float sdRRect(vec2 p, vec2 half_, float r) {
+  vec2 q = abs(p) - half_ + r;
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
+  float d2 = sdRRect(p.xy, halfWH - edge, max(corner - edge, 0.01));
+  float wz = abs(p.z) - (halfD - edge);
+  return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - edge;
+}
+
+// Two prisms and nothing else. No cuts, no buttons, no smax - the buttons and
+// the USB-C port wait on a reference that has not arrived, and keeping map()
+// this small is what lets the step count below be generous for free.
+float map(vec3 p) {
+  float body = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+  float bump = sdPrism(p - vec3(BUMP_OX, BUMP_OY, BUMP_CZ),
+                       vec2(BUMP_HW, BUMP_HH), BUMP_R, BUMP_T * 0.5, BUMP_E);
+  return min(body, bump);
+}
+
+vec3 normalAt(vec3 p) {
+  vec2 e = vec2(0.035, 0.0);
+  return normalize(vec3(
+    map(p + e.xyy) - map(p - e.xyy),
+    map(p + e.yxy) - map(p - e.yxy),
+    map(p + e.yyx) - map(p - e.yyx)));
+}
+
+// --- generated studio environment, as STUDIO_FRAG and LAPTOP_FRAG ---
+vec3 softbox(vec3 d, vec3 axis, vec2 halfUV, vec3 colour, float intensity,
+             float softness, float rough) {
+  float ca = dot(d, axis);
+  if (ca <= 0.05) return vec3(0.0);
+  vec3 up = abs(axis.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(cross(up, axis));
+  vec3 b = cross(axis, t);
+  vec2 uv = vec2(dot(d, t), dot(d, b)) / ca;
+  float e = softness * (0.25 + 1.75 * rough);
+  float m = smoothstep(halfUV.x + e, halfUV.x - e, abs(uv.x)) *
+            smoothstep(halfUV.y + e, halfUV.y - e, abs(uv.y));
+  return m * colour * intensity;
+}
+
+vec3 environment(vec3 d, float rough) {
+  vec3 col = mix(vec3(0.075, 0.078, 0.086), vec3(0.17, 0.175, 0.195),
+                 clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
+  col += softbox(d, normalize(vec3(-0.34, 0.70, 0.63)), vec2(0.66, 0.46), vec3(1.00, 0.98, 0.95), 5.2, 0.40, rough);
+  col += softbox(d, normalize(vec3( 0.88, 0.12, 0.36)), vec2(0.40, 0.62), vec3(0.86, 0.90, 1.00), 2.6, 0.48, rough);
+  col += softbox(d, normalize(vec3( 0.14, 0.58,-0.82)), vec2(0.50, 0.28), vec3(1.00, 0.95, 0.88), 3.0, 0.42, rough);
+  col += softbox(d, normalize(vec3(-0.30, 0.34, 0.89)), vec2(0.50, 0.70), vec3(1.0), 3.4, 0.55, rough);
+  return col;
+}
+
+vec3 envSpec(vec3 d, float rough) {
+  vec3 up = abs(d.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(cross(up, d));
+  vec3 b = cross(d, t);
+  float a = rough * rough * 1.7;
+  vec3 s = environment(d, rough) * 2.0;
+  for (int i = 0; i < 6; i++) {
+    float ang = float(i) * 1.0471976;
+    s += environment(normalize(d + (t * cos(ang) + b * sin(ang)) * a), rough);
+  }
+  return s / 8.0;
+}
+
+// Sixth copy of fitUV. See the note above imgPanRange in JS - all of them plus
+// imgPanRange have to move together.
+vec3 fitUV(vec2 uv, float sa, float ia, float mode, vec2 pan, float zm) {
+  vec2 s = (uv - 0.5) / zm + 0.5 + pan;
+  vec2 t = s;
+  float bar = 0.0;
+  if (mode > 0.5 && mode < 1.5) {
+    if (ia > sa) t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    else         t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+  } else if (mode >= 1.5) {
+    if (ia > sa) t.x = 0.5 + (s.x - 0.5) * (ia / sa);
+    else         t.y = 0.5 + (s.y - 0.5) * (sa / ia);
+    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) bar = 1.0;
+  }
+  return vec3(t, bar);
+}
+
+// Plain Schlick, for the display glass - a real dielectric coat, and correct
+// as Schlick. The chassis uses envBRDF instead.
+vec3 fres(vec3 f0, float c) { return f0 + (1.0 - f0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
+vec3 encode(vec3 c) { return pow(clamp(c / (1.0 + c), 0.0, 1.0), vec3(1.0 / 2.2)); }
+
+// Split-sum environment BRDF, verbatim from LAPTOP_FRAG. The masking term is
+// what keeps reflectance finish-dependent at grazing instead of going to 1, and
+// it is the whole reason the chassis reads as Space Black rather than grey.
+vec2 envBRDF(float rough, float ndv) {
+  vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+  vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+  vec4 r = rough * c0 + c1;
+  float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+  return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Body tonemap, verbatim from LAPTOP_FRAG. Chassis only - encode() still tones
+// the glass reflection, so the design never passes through the HDR curve.
+vec3 encodeBody(vec3 c) {
+  vec3 x = c * BODY_EXPOSURE;
+  return pow(clamp(x * (1.0 + x / (BODY_WHITE * BODY_WHITE)) / (1.0 + x), 0.0, 1.0),
+             vec3(1.0 / 2.2));
+}
+
+vec4 shadeRay(vec2 fc, out float edge) {
+  vec2 ndc = vec2((fc.x / uRes.x) * 2.0 - 1.0,
+                  1.0 - (fc.y / uRes.y) * 2.0);
+  ndc.y = -ndc.y;
+  vec3 dir = normalize(vec3(ndc.x * uTanHalf * uAspect, ndc.y * uTanHalf, -1.0));
+  vec3 ro = uRotT * vec3(0.0, 0.0, uCamZ);
+  vec3 rd = uRotT * dir;
+
+  // Bounding sphere and a pixel-relative hit test, as LAPTOP_FRAG. NOT the
+  // phone's fixed uCamZ - 140: the tablet's radius is 153.2, so a near face can
+  // sit closer than 140 and the ray would start INSIDE the body, where map()
+  // is negative and an absolute threshold is trivially true - a confident hit
+  // at the start point with a garbage normal, i.e. a flat clipped face.
+  //
+  // 384 steps, not the phone's 96. Step count follows face extent over grazing
+  // clearance, not SDF complexity: a ray grazing at clearance d advances 0.9d,
+  // and the 306mm chord needs 306/(0.9d) steps, so 96 only covers d >= 3.5mm
+  // and the 249.7mm face goes see-through at steep tilts. At 384 the cover is
+  // d >= 0.89mm. Nearly free - background rays leave the sphere and direct hits
+  // break on contact, so only the thin grazing band pays, and a dynamic loop
+  // with two breaks costs nothing to compile.
+  float pxK = 2.0 * uTanHalf / uRes.y;
+  float t = max(uCamZ - uRadius, 1.0);
+  bool hit = false, left = false;
+  float bestR = 1e9, tBest = t, dLast = 1e9, pxLast = 1.0;
+  for (int i = 0; i < 384; i++) {
+    vec3 p = ro + rd * t;
+    float d = map(p);
+    float px = pxK * t;
+    float r = d / px;
+    dLast = d; pxLast = px;
+    if (r < bestR) { bestR = r; tBest = t; }
+    if (d < 0.05 * px) { hit = true; break; }
+    t += max(d * 0.9, 0.02 * px);
+    if (t > uCamZ + uRadius) { left = true; break; }
+  }
+  // Still marching and within half a pixel: a grazing hit, not a miss. Without
+  // this a step shortfall degrades to a hole rather than a grazing hit.
+  if (!hit && !left && dLast < 0.5 * pxLast) hit = true;
+  edge = (!hit && bestR < 1.5) ? 1.0 : 0.0;
+  float cover = hit ? 1.0 : clamp(0.5 - bestR, 0.0, 1.0);
+  if (cover <= 0.0) return vec4(0.0);
+  if (!hit) t = tBest;
+
+  vec3 p = ro + rd * t;
+  vec3 n = normalAt(p);
+  vec3 nw = uRot * n;
+  vec3 vw = uRot * (-rd);
+
+  float dScreen = sdRRect(p.xy, vec2(SW, SH), SCREEN_R);
+  float dGlass = sdRRect(p.xy, vec2(W * 0.5 - LIP_W, H * 0.5 - LIP_W),
+                         max(CORNER - LIP_W, 0.01));
+
+  // Pixel footprint in millimetres, and the tilt stretch along the edge normal,
+  // exactly as STUDIO_FRAG derives them.
+  float pxmm = 2.0 * uTanHalf * max(uCamZ - (uRot * p).z, 1.0) / uRes.y;
+  float aa = pxmm * 0.75;
+  vec2 hG = vec2(W * 0.5 - LIP_W, H * 0.5 - LIP_W);
+  float rG = max(CORNER - LIP_W, 0.01);
+  vec2 g = vec2(sdRRect(p.xy + vec2(0.01, 0.0), hG, rG) - sdRRect(p.xy - vec2(0.01, 0.0), hG, rG),
+                sdRRect(p.xy + vec2(0.0, 0.01), hG, rG) - sdRRect(p.xy - vec2(0.0, 0.01), hG, rG));
+  float kG = dot(g / max(length(g), 1e-6), rd.xy) / max(abs(rd.z), 0.15);
+  aa *= sqrt(1.0 + kG * kG);
+
+  float onFront = smoothstep(0.30, 0.55, n.z) * step(D * 0.5 - EDGE - 0.35, p.z);
+  float glassA = onFront * (1.0 - smoothstep(-aa, aa, dGlass));
+
+  // Display uv. In landscape the BODY is turned by the render matrix, so the
+  // object-space display is still portrait; swapping the axes here is what stops
+  // the design coming out sideways. Done at the call site rather than inside
+  // fitUV, which now has six copies that must stay identical.
+  float u  = uLandscape > 0.5 ? (p.y + SH) / (2.0 * SH) : (p.x + SW) / (2.0 * SW);
+  float v  = uLandscape > 0.5 ? (p.x + SW) / (2.0 * SW) : (SH - p.y) / (2.0 * SH);
+  float sa = uLandscape > 0.5 ? SW / SH : SH / SW;
+
+  vec3 design = vec3(0.0);
+  if (n.z > 0.0 && dScreen < aa) {
+    if (uHasTex > 0.5) {
+      vec3 fit = fitUV(vec2(u, v), sa, uSrcAspect, uFitMode, uImgPan, uImgZoom);
+      design = fit.z > 0.5 ? vec3(0.0)
+                           : texture2D(uTex, clamp(fit.xy, 0.001, 0.999)).rgb;
+    } else {
+      design = vec3(0.93);
+    }
+    design *= 1.0 - smoothstep(-aa, aa, dScreen);
+  }
+
+  // Front camera, painted in millimetres on the bezel as the phone's is: two
+  // concentric circles, each blended by its own coverage rather than hard
+  // tested. It sits outside the display, so it is painted after the screen
+  // fade and is not multiplied by it.
+  // Gated to OUTSIDE the display, not inside it: the camera sits in the bezel,
+  // so the test runs the other way round from the phone's, whose dot lives in
+  // the notch. The bezel is not pure black - design is 0 there but the glass
+  // reflection still lands on it - so the ring goes darker than the bezel and
+  // the iris slightly lighter, which is what makes the dot read at all.
+  float fc2 = length(p.xy - vec2(CAM_X, CAM_Y));
+  float camA = onFront * smoothstep(-aa, aa, dScreen);
+  design = mix(design, vec3(0.020, 0.021, 0.024),
+               camA * (1.0 - smoothstep(-aa, aa, fc2 - 1.05)));
+  design = mix(design, vec3(0.100, 0.130, 0.200),
+               camA * (1.0 - smoothstep(-aa, aa, fc2 - 0.55)));
+
+  // Chassis. One finish over body, rails and bump alike.
+  vec3 r = reflect(-vw, nw);
+  float ndv = clamp(dot(nw, vw), 0.0, 1.0);
+  vec2 ab = envBRDF(ROUGH_BODY, ndv);
+  vec3 bodyF = uFinish * ab.x + ab.y;
+  vec3 specR = envSpec(r, ROUGH_BODY), diffN = envSpec(nw, 0.95);
+  vec3 metal = specR * bodyF + diffN * uFinish * max(vec3(0.0), 1.0 - bodyF) * BODY_K;
+
+  // The bump's optics, painted on its top face. They stand at most 0.52mm proud
+  // of the housing, which is under a pixel at any Studio framing, so modelling
+  // them as geometry would cost map() calls for relief that cannot be resolved.
+  // Positions and diameters measured on the 3/4 back view, de-foreshortened by
+  // the lens blobs' own width/height. Which circle is LiDAR and which is the
+  // flash needs the labelled diagram that did not arrive - it changes nothing
+  // here, since all three render as dark glass.
+  float onBack = smoothstep(0.30, 0.55, -n.z) * step(p.z, BUMP_CZ + BUMP_T * 0.5 + 0.2);
+  vec2 bq = p.xy - vec2(BUMP_OX, BUMP_OY);
+  float lens = length(bq - vec2( 4.44,  5.45)) - 5.65;
+  float lidar = length(bq - vec2( 4.77, -6.73)) - 4.37;
+  float flash = length(bq - vec2(-8.24,  4.64)) - 1.85;
+  float optic = min(min(lens, lidar), flash);
+  metal *= mix(1.0, 0.16, onBack * (1.0 - smoothstep(-aa, aa, optic)));
+  // a thin bright ring where each barrel meets the housing
+  metal *= mix(1.0, 1.18, onBack * (1.0 - smoothstep(0.0, 0.35 + aa, abs(optic))));
+
+  // Antenna band. A measured tone rather than a material: the ratio is 0.892 on
+  // Silver against 0.546 on Space Black, and a single multiply gives the same
+  // ratio on both by construction. Two physical models were prototyped and both
+  // failed - band roughness tops out at 0.95/0.88 because specR stays at
+  // ROUGH_BODY and only the split-sum term moves, and a dielectric inlay misses
+  // in opposite directions (0.56 Silver, 1.18 Space Black). So it arrives per
+  // finish as a uniform, the same way KB_CAPTONE and TP_TONE are measured tones.
+  // Footprint is rail-local, as the laptop's daa, not the glass-edge aa.
+  float baa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
+  float bandA = smoothstep(0.55, 0.80, abs(n.x))
+              * (1.0 - smoothstep(BAND_HW - baa, BAND_HW + baa, abs(p.y - BAND_Y)));
+  metal *= mix(1.0, uBandTone, bandA);
+
+  float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFront;
+  metal *= mix(1.0, HAIR_K, seam);
+
+  vec3 refl = environment(r, 0.045);
+  vec3 f = fres(vec3(0.085), ndv);
+  vec3 glass = design * (1.0 - f) + encode(refl) * f;
+  vec3 col = mix(encodeBody(metal), glass, glassA);
+
+  // Where one ray cannot resolve the result: the bump/body crease, the glass
+  // outline, and the EDGE chamfer. edge is write-only with one ray, so this is
+  // dropped by the compiler and kept as documentation, as in STUDIO_FRAG.
+  float dBody = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+  float dBump = sdPrism(p - vec3(BUMP_OX, BUMP_OY, BUMP_CZ),
+                        vec2(BUMP_HW, BUMP_HH), BUMP_R, BUMP_T * 0.5, BUMP_E);
+  float dRail = sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - EDGE, CORNER - EDGE);
+  float dFace = abs(p.z) - (D * 0.5 - EDGE);
+  if (min(dBody, dBump) > -2.0 * pxmm || abs(dGlass) < 2.0 * aa ||
+      (dRail > -2.0 * pxmm && dFace > -2.0 * pxmm)) edge = 1.0;
+
+  return vec4(col, cover);
+}
+
+// One ray per pixel, supersampled by renderTiled, as the other two bodies.
+void main() {
+  float edge;
+  vec2 fc = gl_FragCoord.xy + uOrigin;
+  vec2 jit = vec2(mod(floor(fc.y), 2.0) < 0.5 ? -0.25 : 0.25,
+                  mod(floor(fc.x), 2.0) < 0.5 ?  0.25 : -0.25);
+  vec4 c = shadeRay(fc + jit * uJit, edge);
+  if (c.a <= 0.0) discard;
+  gl_FragColor = c;
+}
+`;
+
 // Screen only: the display content at the Studio pose, with the chassis gone.
 // Deliberately a separate program rather than a branch in STUDIO_FRAG — without
 // a body there is nothing to occlude the glass, so the 96-step march collapses
@@ -2235,9 +2612,13 @@ uniform float uSweepScale; // sweep size relative to the phone's; laptop ~3.3
 uniform vec3  uCenter;     // laptop rotation pivot in object space
 uniform vec2  uLidCS;      // cos, sin of the lid angle
 uniform float uReflSteps;  // reflection march step cap
-
-const float W = 71.5, H = 146.7, D = 7.65;
-const float CORNER = 12.0, EDGE = 1.15;
+// The prism branch's own dimensions, so a third rounded-slab body needs no new
+// SDF here - only different numbers. The phone passes exactly the literals that
+// used to be compiled in: 71.5, 146.7 and 7.65 convert from double to float
+// identically whether the GLSL parser or gl.uniform1f does it, so the
+// bit-for-bit promise above still holds.
+uniform vec4  uPrismA;     // half width, half height, corner radius, edge
+uniform float uPrismD;     // half depth
 
 // The sweep, in millimetres. The curve is the whole point: a cyclorama has no
 // seam, so the eye never finds a horizon line, only a gradient.
@@ -2338,7 +2719,7 @@ float marchBody(vec3 ro, vec3 rd, float t0, float pxK, out float tHit) {
     if (float(i) >= uReflSteps) break;
     vec3 q = ro + rd * t;
     float d = uDevice > 0.5 ? sdLaptop(q)
-                            : sdPrism(q, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
+                            : sdPrism(q, uPrismA.xy, uPrismA.z, uPrismD, uPrismA.w);
     float r = d / (pxK * (t0 + t));
     if (r < bestR) { bestR = r; tHit = t; }
     if (d < 0.05) { tHit = t; return 1.0; }
@@ -2400,7 +2781,7 @@ void main() {
 
 const glCanvas = document.createElement('canvas');
 const gl = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true, antialias: false });
-let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, screenProgram = null, laptopProgram = null, texture = null, hasTexture = false;
+let program = null, assetProgram = null, studioProgram = null, backdropProgram = null, screenProgram = null, laptopProgram = null, tabletProgram = null, texture = null, hasTexture = false;
 
 function buildProgram(fragSrc) {
   const vs = gl.createShader(gl.VERTEX_SHADER);
@@ -2428,6 +2809,10 @@ function initGL() {
   assetProgram = buildProgram(ASSET_FRAG);
   studioProgram = buildProgram(STUDIO_FRAG);
   laptopProgram = buildProgram(LAPTOP_FRAG);
+  // Eager, with the rest. The documented compile incident is about inlined body
+  // size WITHIN one program, not program count, and this one links in ~0.3s
+  // against the phone's ~1.1s because map() is two prisms.
+  tabletProgram = buildProgram(TABLET_FRAG);
   backdropProgram = buildProgram(BACKDROP_FRAG);
   screenProgram = buildProgram(SCREEN_FRAG);
   const buf = gl.createBuffer();
@@ -2740,7 +3125,9 @@ function render(canvas, W, H) {
   // renderStudio, and the photo view only ever from renderPhoto.
   if (state.mode === 'studio') {
     if (photoShown()) return renderPhoto(canvas, W, H);
-    return laptopShown() ? renderLaptop(canvas, W, H) : renderStudio(canvas, W, H);
+    if (laptopShown()) return renderLaptop(canvas, W, H);
+    if (tabletShown()) return renderTablet(canvas, W, H);
+    return renderStudio(canvas, W, H);
   }
   if (state.mode === 'screen') return renderScreen(canvas, W, H);
   if (state.mode === 'asset' && BUNDLES[state.bundle]) return renderAsset(canvas, W, H);
@@ -2790,6 +3177,41 @@ function laptopFrame(lidDeg) {
   let radius = 0;
   for (const p of pts) radius = Math.max(radius, Math.hypot(p.x - center.x, p.y - center.y, p.z - center.z));
   return { center, radius };
+}
+
+// The Studio tablet, millimetres. The same numbers as TABLET_FRAG's constants
+// and, like LAPTOP, a hand-kept duplicate - nothing enforces that they agree.
+// Display is derived, not measured: 2420x1668 at 264 ppi.
+const TABLET = { W: 177.5, H: 249.7, D: 5.3, R: 15.3, DW: 160.5, DH: 232.8 };
+// Bounding sphere about the origin. The bump's far corner reaches 144.0, inside
+// this, so the body's own half-diagonal bounds the whole device.
+const TABLET_RADIUS = Math.hypot(Math.hypot(TABLET.W / 2, TABLET.H / 2), TABLET.D / 2);
+// Landscape is a 90 degree post-rotation applied to the BODY here, never a
+// change to state.rz: that slider clamps to +-45, and the next input event
+// would write the clamped value back and silently snap out of landscape.
+// Rz(-90) so the long edge carrying the front camera swings to the top.
+const TABLET_RZ90 = rotationMatrix(0, 0, -90);
+function tabletShown() { return state.mode === 'studio' && state.studioDevice === 'tablet'; }
+// Object -> world for the tablet, including the orientation fold. R * Rz90, not
+// Rz90 * R: the body turns and the camera angles still mean what they say.
+function tabletMatrix() {
+  const R = rotationMatrix(state.rx, state.ry, state.rz);
+  return state.tabletLandscape ? mul3(R, TABLET_RZ90) : R;
+}
+function mul3(a, b) {
+  const o = new Array(9);
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+    o[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+  return o;
+}
+// One rigid slab, so one silhouette ring - no lid, no second hull.
+function tabletOutline3D(steps) {
+  const T = TABLET, out = [];
+  for (const o of roundedOutline(T.W, T.H, T.R, steps)) {
+    out.push({ x: o.x, y: o.y, z: T.D / 2 });
+    out.push({ x: o.x, y: o.y, z: -T.D / 2 });
+  }
+  return out;
 }
 
 // Silhouette points of each part separately, so each casts its own shadow hull —
@@ -2904,6 +3326,26 @@ const LAPTOP_FINISHES = {
   Silver: [0.864, 0.852, 0.918]
 };
 const LAPTOP_FINISH_TILES = { 'Space Black': '#2E2F33', Silver: '#D6D7DA' };
+// The iPad Pro ships the same two finishes, and TABLET_FRAG reads uFinish as F0
+// exactly as LAPTOP_FRAG does, so it shares the table rather than duplicating
+// it. Its own side profile measures Silver against Space Black at 3.07-3.17x
+// under one light and the shader lands 3.14x, so these need no retune.
+// Aliased, not copied: one calibration, one place to change it.
+const TABLET_FINISHES = LAPTOP_FINISHES;
+const TABLET_FINISH_TILES = LAPTOP_FINISH_TILES;
+// Antenna band tone. MEASURED on references 3.png with matched sampling windows
+// on both devices, as an sRGB ratio of the band against the rail above and below
+// it: Silver 0.892, Space Black 0.546. Per finish because the ratio genuinely
+// differs and no single multiply can be both; the shader comment above BAND_Y
+// records the two physical models tried before settling on a measured tone.
+//
+// The numbers below are those ratios converted to LINEAR multipliers, because
+// the band multiplies `metal` before encodeBody, not the encoded pixel. Feeding
+// the sRGB ratios in directly made the band far too weak - 0.99 against a wanted
+// 0.892 on Silver. Solved numerically against the real material at four rail
+// poses; the factors cluster to within 0.025 (Silver) and 0.002 (Space Black),
+// so one constant per finish is well defined rather than pose-dependent.
+const TABLET_BAND = { 'Space Black': 0.262, Silver: 0.755 };
 
 // Draws the Studio Sweep backdrop straight onto the 2D context. Runs after the
 // device pass has already been copied out to its own layer, so clobbering
@@ -2939,9 +3381,21 @@ function paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundY, dev) {
     : (state.highlightStrength != null ? state.highlightStrength : 100) / 100;
   gl.uniform1f(u('uPool'), pool);
   const lap = !!(dev && dev.laptop);
+  const tab = !!(dev && dev.tablet);
   gl.uniform1f(u('uDevice'), lap ? 1 : 0);
-  gl.uniform1f(u('uSweepScale'), lap ? dev.scale : 1);
-  gl.uniform1f(u('uReflSteps'), lap ? 80 : 40);
+  // The prism branch serves phone and tablet alike; only its dimensions differ.
+  if (tab) {
+    const T = dev.dims;
+    gl.uniform4f(u('uPrismA'), T.W * 0.5, T.H * 0.5, T.R, 0.65);
+    gl.uniform1f(u('uPrismD'), T.D * 0.5);
+  } else {
+    gl.uniform4f(u('uPrismA'), 71.5 * 0.5, 146.7 * 0.5, 12.0, 1.15);
+    gl.uniform1f(u('uPrismD'), 7.65 * 0.5);
+  }
+  // A tablet on the phone's floor would have the cyclorama curve cut up through
+  // it, and 40 steps is short for a reflected path scaled by 1.875.
+  gl.uniform1f(u('uSweepScale'), (lap || tab) ? dev.scale : 1);
+  gl.uniform1f(u('uReflSteps'), (lap || tab) ? 80 : 40);
   gl.uniform3f(u('uCenter'), lap ? dev.center.x : 0, lap ? dev.center.y : 0, lap ? dev.center.z : 0);
   const la = (lap ? dev.lid : 0) * Math.PI / 180;
   gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
@@ -3058,6 +3512,10 @@ function renderLaptop(canvas, W, H) {
   const u = n => gl.getUniformLocation(laptopProgram, n);
   const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
   const la = lid * Math.PI / 180;
+  // Hoisted out of the tile callback: paintSweep below needs it, and declaring
+  // it inside the callback left that read out of scope, so sweep-background
+  // laptop renders threw ReferenceError and drew nothing.
+  const fin = LAPTOP_FINISHES[state.laptopFinish] || LAPTOP_FINISHES['Space Black'];
   // As renderStudio: uRes is the VIRTUAL frame, uOrigin the tile's place in it.
   const scratch = renderTiled(W, H, ssNow, (VW, VH, ox, oy) => {
     gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
@@ -3071,7 +3529,6 @@ function renderLaptop(canvas, W, H) {
     gl.uniform1f(u('uRadius'), radius);
     gl.uniform3f(u('uCenter'), center.x, center.y, center.z);
     gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
-    const fin = LAPTOP_FINISHES[state.laptopFinish] || LAPTOP_FINISHES['Space Black'];
     gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
     gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
     gl.uniform1f(u('uSrcAspect'), srcAspect);
@@ -3123,6 +3580,91 @@ function renderLaptop(canvas, W, H) {
     const hullBase = convexHull(cast.slice(0, base.length).map(toPx));
     const hullLid = convexHull(cast.slice(base.length).map(toPx));
     paintShadow(ctx, hullBase, W, H, 1.0, [hullLid]);
+  }
+  ctx.drawImage(scratch, 0, 0);
+}
+
+function renderTablet(canvas, W, H) {
+  const ctx = canvas.getContext('2d');
+  canvas.width = W; canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+  if (!state.transparent) { ctx.fillStyle = state.bg; ctx.fillRect(0, 0, W, H); }
+  if (!gl || !tabletProgram) return;
+
+  const land = !!state.tabletLandscape;
+  const R = tabletMatrix();
+  const Rt = [R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]];
+  const radius = TABLET_RADIUS;
+  // As renderLaptop: camera distance scaled by the body's size, so a given
+  // Perspective means the same thing on every body. The phone's literal would
+  // give a 28.6 degree half-angle here against its own 14.8.
+  const camZ = (1400 - (state.persp / 100) * 1080) * radius / PHONE_RADIUS;
+  const half = Math.asin(Math.min(radius / camZ, 0.99));
+  const tanHalf = Math.tan(half / (state.zoom / 100));
+  // The display is portrait in object space whatever the orientation, so the
+  // aspect handed to the fitter has to follow the fold or the pan limits are
+  // clamped against the wrong one - and clampImgPan writes its result back.
+  const dispAspect = land ? TABLET.DW / TABLET.DH : TABLET.DH / TABLET.DW;
+
+  gl.useProgram(tabletProgram);
+  gl.disable(gl.BLEND);
+  const u = n => gl.getUniformLocation(tabletProgram, n);
+  const colMajor = m => new Float32Array([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
+  const fin = TABLET_FINISHES[state.tabletFinish] || TABLET_FINISHES['Space Black'];
+  const scratch = renderTiled(W, H, ssNow, (VW, VH, ox, oy) => {
+    gl.uniformMatrix3fv(u('uRot'), false, colMajor(R));
+    gl.uniformMatrix3fv(u('uRotT'), false, colMajor(Rt));
+    gl.uniform2f(u('uRes'), VW, VH);
+    gl.uniform2f(u('uOrigin'), ox, oy);
+    gl.uniform1f(u('uJit'), ssNow === 2 ? 1.0 : 0.0);
+    gl.uniform1f(u('uCamZ'), camZ);
+    gl.uniform1f(u('uTanHalf'), tanHalf);
+    gl.uniform1f(u('uAspect'), VW / VH);
+    gl.uniform1f(u('uRadius'), radius);
+    gl.uniform1f(u('uLandscape'), land ? 1 : 0);
+    gl.uniform1f(u('uBandTone'), TABLET_BAND[state.tabletFinish] != null
+                                 ? TABLET_BAND[state.tabletFinish] : 1.0);
+    gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+    gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
+    gl.uniform1f(u('uSrcAspect'), srcAspect);
+    gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
+    setImgUniforms(u, dispAspect);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(u('uTex'), 0);
+  });
+  deviceBounds = boundsFromLayer(scratch, W, H);
+
+  const toPx = (q) => {
+    const d = Math.max(camZ - q.z, 1e-3);
+    const nx = q.x / (d * tanHalf * (W / H));
+    const ny = q.y / (d * tanHalf);
+    return { x: (nx + 1) * 0.5 * W, y: (1 - ny) * 0.5 * H };
+  };
+
+  // Display corners in uv order. The corner COORDINATES follow the fold, not
+  // the array order - rotating the array instead would rotate the design by 90
+  // degrees on every drag.
+  if (wantQuad) {
+    const T = TABLET, hw = T.DW / 2, hh = T.DH / 2;
+    const corners = land
+      ? [[-hw, -hh], [-hw, hh], [hw, hh], [hw, -hh]]
+      : [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]];
+    screenQuad = corners.map(([x, y]) => toPx(applyR(R, { x, y, z: T.D / 2 })));
+  }
+
+  const world = tabletOutline3D(14).map(p => applyR(R, p));
+
+  if (state.bgMode === 'sweep' && !state.transparent) {
+    // Must pass a dev: without one paintSweep reflects the PHONE prism under the
+    // tablet on a phone-sized floor, and the cyclorama curve cuts through it.
+    paintSweep(ctx, W, H, camZ, tanHalf, Rt, groundPlaneY(world),
+               { tablet: true, scale: radius / PHONE_RADIUS, finish: fin,
+                 dims: TABLET, landscape: land });
+  }
+
+  if (state.shadow) {
+    paintShadow(ctx, convexHull(castToGround(world).map(toPx)), W, H, 1.0);
   }
   ctx.drawImage(scratch, 0, 0);
 }
@@ -3549,6 +4091,10 @@ state.lid = 110;
 // The laptop's finish, kept apart from state.finish so switching device leaves the
 // phone's finish as it was.
 state.laptopFinish = 'Space Black';
+// --- tablet defaults (distinctive comment: use THIS as the patch anchor, not
+// the bare assignments, which each appear again in the restore handler) ---
+state.tabletFinish = 'Space Black';
+state.tabletLandscape = false;
 
 const preview = document.getElementById('preview');
 const statusText = document.getElementById('statustext');
@@ -3750,8 +4296,15 @@ let photoPlacement = null;     // photo -> canvas mapping used by the preview
 // stored `true` would reopen onto an empty photo. Needs a photo to mean
 // anything, so a missing one always falls back to the phone.
 let photoView = false;
+// Tested as "is the phone", not "is not the laptop". Photo matching applies the
+// recovered pose to the STUDIO PHONE and fits against STUDIO_ASPECT, so any
+// other body reaching here renders a phone instead of itself - and because this
+// is checked before the body dispatch, the tablet would never render at all.
+function phoneShown() {
+  return state.mode === 'studio' && state.studioDevice === 'phone';
+}
 function photoShown() {
-  return state.mode === 'studio' && state.studioDevice !== 'laptop' && photoView && !!photoBitmap;
+  return phoneShown() && photoView && !!photoBitmap;
 }
 
 // Display proportions of the Studio phone, which is what the angle is applied
@@ -4078,6 +4631,49 @@ function buildChips(id, keys, onPick, active, withTile) {
   });
 }
 
+// Disclosure popovers. One registry so a single document listener serves every
+// one of them, and opening one closes the rest.
+//
+// The panel's own `hidden` attribute stays the source of truth rather than a
+// boolean kept alongside it: callers already test it directly (refreshPresetChips
+// rebuilds only when the menu is open), so nothing outside here has to change.
+//
+// Dismissal is new behaviour for the Angle menu, which until now closed only via
+// its own button or a pick. Clicks on the trigger or inside the panel are
+// excluded, or the click that opens a menu would bubble to the document handler
+// and immediately close it again.
+const POPOVERS = [];
+function registerPopover(btnId, panelId, build) {
+  const btn = document.getElementById(btnId);
+  const panel = document.getElementById(panelId);
+  const api = {
+    isOpen: () => !panel.hidden,
+    set(open) {
+      if (open) build();
+      panel.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    },
+    // rebuild in place for callers that change the contents while it is showing
+    refresh() { if (!panel.hidden) build(); },
+    owns(node) { return btn.contains(node) || panel.contains(node); }
+  };
+  btn.addEventListener('click', () => {
+    const wasOpen = api.isOpen();
+    POPOVERS.forEach(p => p.set(false));
+    api.set(!wasOpen);
+  });
+  POPOVERS.push(api);
+  return api;
+}
+document.addEventListener('click', (ev) => {
+  POPOVERS.forEach(p => { if (!p.owns(ev.target)) p.set(false); });
+});
+// The space-pan keydown handler early-returns on any other key, so Escape here
+// costs it nothing.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') POPOVERS.forEach(p => p.set(false));
+});
+
 // Segmented control: sunken tray, white pill on the selected item.
 function buildSeg(id, pairs, onPick, activeValue) {
   const el = document.getElementById(id);
@@ -4161,21 +4757,37 @@ function drawLaptopThumb(canvas, a) {
   });
 }
 
-function drawAngleThumb(canvas, a) {
-  if (laptopShown()) return drawLaptopThumb(canvas, a);
+// The BODY is a parameter, never read from state. The angle gallery draws every
+// preset with this, passing each preset's own angle, so a painter that consulted
+// state for the pose rendered all six tiles identically - which is how the
+// tablet's presets shipped indistinguishable. Orientation is the one thing that
+// does come from state, because it is a property of the body rather than of the
+// angle, and every tile should show the body as it currently stands.
+//
+// SLABS holds what used to be hardcoded phone numbers: outline, glass inset and
+// half-depth. The depth is roughly twice the real one on purpose - at a 48px
+// tile a true 5.3mm edge on a 177mm body is invisible.
+const SLABS = {
+  phone:  { w: 71.5, h: 146.7, r: 12.0, gw: 61.5, gh: 136.7, gr: 8.0, d: 7.65 },
+  tablet: { w: 177.5, h: 249.7, r: 15.3, gw: 160.5, gh: 232.8, gr: 6.8, d: 5.30 }
+};
+function drawBodyThumb(canvas, a, body) {
+  if (body === 'laptop') return drawLaptopThumb(canvas, a);
   const S = canvas.width, ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, S, S);
-  const R = rotationMatrix(a.rx, a.ry, a.rz);
+  const B = SLABS[body] || SLABS.phone;
+  const R0 = rotationMatrix(a.rx, a.ry, a.rz);
+  const R = (body === 'tablet' && state.tabletLandscape) ? mul3(R0, TABLET_RZ90) : R0;
   const camZ = 1400 - (a.persp / 100) * 1080;
   const proj = (o, z) => {
     const q = applyR(R, { x: o.x, y: o.y, z });
     const d = Math.max(camZ - q.z, 20);
     return { x: q.x / d, y: -q.y / d };
   };
-  const out = roundedOutline(71.5, 146.7, 12, 4);
-  const scr = roundedOutline(61.5, 136.7, 8, 4);
-  const front = out.map(o => proj(o, 7.65)), back = out.map(o => proj(o, -7.65));
-  const glass = scr.map(o => proj(o, 7.7));
+  const out = roundedOutline(B.w, B.h, B.r, 4);
+  const scr = roundedOutline(B.gw, B.gh, B.gr, 4);
+  const front = out.map(o => proj(o, B.d)), back = out.map(o => proj(o, -B.d));
+  const glass = scr.map(o => proj(o, B.d + 0.05));
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   front.concat(back).forEach(p => {
     x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
@@ -4197,6 +4809,52 @@ function drawAngleThumb(canvas, a) {
   }
   poly(front, '#D1D1D6');
   poly(glass, '#AEAEB2');
+}
+
+// The angle gallery always draws the body currently selected; only the device
+// picker draws the others. Signature kept so its three call sites do not move.
+function drawAngleThumb(canvas, a) {
+  return drawBodyThumb(canvas, a, state.studioDevice);
+}
+
+// Devices as a disclosure rather than a segmented row: .seg does not wrap, its
+// buttons split the row evenly, and in the side-by-side layout that is about
+// 108px each - not enough for "MacBook Pro 16"", which then wrapped inside its
+// own button. A list that grows is what a dropdown is for.
+//
+// Each tile draws its own body, posed at the default angle setStudioDevice gives
+// that body, so the three are comparable.
+function deviceThumbAngle(v) {
+  const first = v === 'laptop' ? 'Three-quarter left' : 'Turn left';
+  const table = v === 'laptop' ? LAPTOP_PRESETS : PRESETS;
+  return table[first];
+}
+function buildDeviceMenu() {
+  const el = document.getElementById('devicemenu');
+  el.innerHTML = '';
+  const tiles = document.createElement('div');
+  tiles.className = 'tiles';
+  STUDIO_DEVICES.forEach(([label, value]) => {
+    const b = document.createElement('button');
+    b.className = 'atile' + (value === state.studioDevice ? ' on' : '');
+    const c = document.createElement('canvas');
+    c.width = c.height = 96;
+    drawBodyThumb(c, deviceThumbAngle(value), value);
+    b.appendChild(c);
+    b.appendChild(document.createTextNode(label));
+    b.onclick = () => { devicePopover.set(false); setStudioDevice(value); };
+    tiles.appendChild(b);
+  });
+  el.appendChild(tiles);
+}
+const devicePopover = registerPopover('devicebtn', 'devicemenu', buildDeviceMenu);
+// The closed control: the current body at its own default angle, plus its name.
+function refreshDeviceButton() {
+  const v = state.studioDevice;
+  const pair = STUDIO_DEVICES.find(([, val]) => val === v);
+  document.getElementById('devicename').textContent = pair ? pair[0] : v;
+  drawBodyThumb(document.getElementById('devicethumb'), deviceThumbAngle(v), v);
+  devicePopover.refresh();
 }
 
 function pickAngle(k) {
@@ -4243,15 +4901,10 @@ function buildAngleMenu() {
   });
 }
 
-function setAngleMenu(open) {
-  const el = document.getElementById('presets');
-  if (open) buildAngleMenu();
-  el.hidden = !open;
-  document.getElementById('presetbtn').setAttribute('aria-expanded', open ? 'true' : 'false');
-}
-document.getElementById('presetbtn').addEventListener('click', () => {
-  setAngleMenu(document.getElementById('presets').hidden);
-});
+// Kept as a thin wrapper so pickAngle and the restore path need no edit.
+const anglePopover = registerPopover('presetbtn', 'presets', buildAngleMenu);
+function setAngleMenu(open) { anglePopover.set(open); }
+
 
 // Name kept from the chip version so the restore path needs no change.
 function refreshPresetChips() {
@@ -4277,6 +4930,9 @@ function applyAngleUI() {
   // The hinge is its own control, apart from the whole-object rotation, and it
   // shows whether or not a preset is active: opening the lid is not a camera move.
   document.getElementById('lidrow').style.display = laptopShown() ? 'flex' : 'none';
+  // Orientation is a property of the body, not a camera move, so like the lid it
+  // shows whether or not a preset is active.
+  document.getElementById('orientrow').style.display = tabletShown() ? 'flex' : 'none';
 }
 
 // The needle angle is the value itself, clockwise from twelve o'clock, like
@@ -4384,6 +5040,11 @@ function refreshFinishChips() {
                state.laptopFinish, LAPTOP_FINISH_TILES);
     return;
   }
+  if (tabletShown()) {
+    buildChips('finishes', Object.keys(TABLET_FINISHES), k => { state.tabletFinish = k; },
+               state.tabletFinish, TABLET_FINISH_TILES);
+    return;
+  }
   buildChips('finishes', Object.keys(FINISHES), k => { state.finish = k; },
              state.finish, true);
 }
@@ -4476,9 +5137,11 @@ function applyMode() {
   // Photo matching fits a phone; the laptop version needs its own design (a
   // traced lid gives the whole-object rotation combined with the hinge), so it
   // is not offered on the laptop yet. Same for matching a photoreal phone angle.
-  const laptop = laptopShown();
-  document.getElementById('photobox').style.display = (studio && !laptop) ? 'block' : 'none';
-  document.getElementById('matchbtn').style.display = laptop ? 'none' : '';
+  // Both of these are "can this body do photo things", which is phone-only.
+  // Written as !laptopShown() they silently offered photo matching to the tablet.
+  const onPhone = phoneShown();
+  document.getElementById('photobox').style.display = (studio && onPhone) ? 'block' : 'none';
+  document.getElementById('matchbtn').style.display = onPhone ? '' : 'none';
   // The toggle only means anything once there is a photo to toggle to.
   document.getElementById('photoview').style.display = photoBitmap ? '' : 'none';
   buildSeg('photoview', PHOTO_VIEWS, v => setPhotoView(v === 'photo'), photo ? 'photo' : 'phone');
@@ -4507,24 +5170,29 @@ function applyMode() {
   draw();
 }
 
-const STUDIO_DEVICES = [['iPhone', 'phone'], ['MacBook Pro 16″', 'laptop']];
+const STUDIO_DEVICES = [['iPhone', 'phone'], ['MacBook Pro 16″', 'laptop'], ['iPad Pro 11″', 'tablet']];
 function setStudioDevice(v) {
   if (state.studioDevice === v) return;
   state.studioDevice = v;
   // Each device has its own preset table, so start it on its default view rather
-  // than carrying phone angles onto the laptop, or laptop angles back.
+  // than carrying phone angles onto the laptop, or laptop angles back. The
+  // tablet deliberately reuses PRESETS - it is a slab like the phone and these
+  // are camera poses - so 'Turn left' is a key its table really has. A preset
+  // name the active table lacks would make Object.assign(state, undefined) a
+  // silent no-op and open the body in Custom with the last body's angles.
   const first = v === 'laptop' ? 'Three-quarter left' : 'Turn left';
   state.preset = first;
   Object.assign(state, activePresets()[first]);
-  // The photo view is phone-only for now.
-  if (v === 'laptop') photoView = false;
+  // The photo view is phone-only.
+  if (v !== 'phone') photoView = false;
   resetView();
   syncSliders();
+  refreshDeviceButton();
   applyMode();
 }
 
 buildSeg('mode', MODES, v => { state.mode = v; applyMode(); }, state.mode);
-buildSeg('studiodevice', STUDIO_DEVICES, setStudioDevice, state.studioDevice);
+refreshDeviceButton();
 applyLayout(false);
 
 function bundleParts() {
@@ -4636,13 +5304,21 @@ syncSliders();
   document.getElementById(id).addEventListener('input', e => { state[id] = e.target.value; drawDraft(); });
 });
 
-['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
+// The id must be in THIS list, not only in the restore-path re-sync list below:
+// a switch left out here still animates, because it is a native checkbox driven
+// by CSS, so it looks like the render is ignoring the state rather than like the
+// state never changing. That is exactly how tabletLandscape shipped inert.
+['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight',
+ 'tabletLandscape'].forEach(id => {
   document.getElementById(id).addEventListener('change', e => {
     state[id] = e.target.checked;
     if (id === 'trim') document.getElementById('trimnote').style.display = e.target.checked ? 'block' : 'none';
     if (id === 'shadow') document.getElementById('shadowbox').style.display = e.target.checked ? 'block' : 'none';
     if (id === 'highlight') document.getElementById('highlightbox').style.display = e.target.checked ? 'block' : 'none';
     if (id === 'transparent') applyBgMode();
+    // Both thumbnails draw the body, so both have to follow the orientation -
+    // the device button's icon was left stale by refreshing only the angle one.
+    if (id === 'tabletLandscape') { refreshPresetChips(); refreshDeviceButton(); }
     draw();
   });
 });
@@ -5102,6 +5778,10 @@ onmessage = async (event) => {
       if (msg.settings.studioDevice === undefined) state.studioDevice = 'phone';
       if (msg.settings.lid === undefined) state.lid = 110;
       if (msg.settings.laptopFinish === undefined) state.laptopFinish = 'Space Black';
+      // Same rule for the tablet: test the SAVED settings, not state. Both must
+      // land before applyMode, which picks the renderer and the finish table.
+      if (msg.settings.tabletFinish === undefined) state.tabletFinish = 'Space Black';
+      if (msg.settings.tabletLandscape === undefined) state.tabletLandscape = false;
       // Photo stopped being a mode and became a view inside Studio. Old photo
       // mockups never stored the photo itself, so they reopen on the phone.
       if (state.mode === 'photo') state.mode = 'studio';
@@ -5114,11 +5794,12 @@ onmessage = async (event) => {
       buildSeg('fit', FITS, v => { state.fit = v; draw(); }, state.fit);
       buildSeg('bgmode', BGMODES, v => { state.bgMode = v; applyBgMode(); draw(); }, state.bgMode);
       buildSeg('screenshape', SCREEN_SHAPES, v => { state.screenShape = v; applyScreenShape(); draw(); }, state.screenShape);
-      buildSeg('studiodevice', STUDIO_DEVICES, setStudioDevice, state.studioDevice);
+      refreshDeviceButton();
       refreshAssetChips();
       applyMode();
       ['body', 'bg'].forEach(id => document.getElementById(id).value = state[id]);
-      ['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight'].forEach(id => {
+      ['clay', 'shadow', 'glare', 'transparent', 'trim', 'highlight',
+       'tabletLandscape'].forEach(id => {
         document.getElementById(id).checked = !!state[id];
       });
       document.getElementById('trimnote').style.display = state.trim ? 'block' : 'none';
@@ -5184,8 +5865,15 @@ const EXPORT_BASE_H = 1080;
 // which already reports the reduced multiplier; code.js sizes the rectangle from the
 // returned scale, so the Figma size stays at the laptop base either way.
 const LAPTOP_EXPORT_MULT = 3;
+// A portrait 11-inch display is ~166.5mm wide against a typical 834pt design
+// frame, so 1x would export a ~1.8x downsample of the design - soft, and only
+// visible on close inspection. This also sets how large the tablet lands on the
+// Figma canvas, since code.js divides the pixel size by the returned scale.
+const TABLET_EXPORT_MULT = 2;
 function exportSize(scale, aspect) {
-  const base = laptopShown() ? EXPORT_BASE_H * LAPTOP_EXPORT_MULT : EXPORT_BASE_H;
+  const base = laptopShown() ? EXPORT_BASE_H * LAPTOP_EXPORT_MULT
+             : tabletShown() ? EXPORT_BASE_H * TABLET_EXPORT_MULT
+             : EXPORT_BASE_H;
   const maxH = Math.floor(MAX_EXPORT_PX / Math.max(1, aspect));
   const H = Math.min(base * scale, maxH, MAX_EXPORT_PX);
   return { W: Math.round(H * aspect), H, scale: H / base };
