@@ -1985,7 +1985,21 @@ vec4 shadeRay(vec2 fc, out float edge) {
   float capA = 0.0;
   if (kbOn > 0.5 && kbKind < 2.5) {
     metal = specR * reflK + diffN * KB_FIN * max(vec3(0.0), 1.0 - reflK) * BODY_K;
-    float kw = pxmm / max(abs(dot(normalize(vec2(rd.x, rd.z)), kbG)), 0.15);
+    // capA antialiases a PLAN-SPACE distance sampled on the KB_TOP plane, so its
+    // half-width is one pixel's footprint ON THAT PLANE, projected onto the plan
+    // gradient. That footprint is an ellipse: pxmm/|rd.y| along the view azimuth,
+    // which is how far the hit point slides per pixel when the plane is near
+    // tangent, by pxmm across it. The old form divided by the gradient alignment,
+    // which is backwards AND missing the grazing stretch. Against a finite
+    // difference of the real hit point it came out 6.1x too narrow across the rows
+    // at Front and 32.6x at Side, while 6.7x too WIDE across the columns. Too
+    // narrow is what turned the cap-top boundary into per-pixel speckle - the
+    // reported keyboard grain - and the legend rides on capA, so it speckled too.
+    vec2 rxz = vec2(rd.x, rd.z);
+    vec2 ah = rxz / max(length(rxz), 1e-6);
+    float along = pxmm / max(abs(rd.y), 0.02);
+    float ga = dot(ah, kbG), gp = ah.x * kbG.y - ah.y * kbG.x;
+    float kw = max(sqrt(along * along * ga * ga + pxmm * pxmm * gp * gp), 1e-4);
     capA = smoothstep(-kw, kw, -kbD);
     metal *= mix(1.0, KB_CAPTONE, capA);
     // the groove floor and the base of a wall sit in shadow; the depth ramp is
