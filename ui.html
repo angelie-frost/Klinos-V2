@@ -2140,7 +2140,12 @@ const float BUMP_CZ = -(D * 0.5 + BUMP_PROUD - BUMP_T * 0.5);
 
 // Front camera, centred on the LONG edge as on the real M4 - mid-side in
 // portrait, top-centre once uLandscape turns the body. Mid-bezel, so 4.25 in.
-const float CAM_X = -(W * 0.5 - 4.25), CAM_Y = 0.0;
+// On +x, not -x: the dimensioned drawing puts the front camera on the same long
+// edge as the volume buttons, which is the right edge of a front view, i.e.
+// object +x. It was on -x before that reference existed. Because the camera has
+// to land top-centre in landscape, this also fixes the fold direction to
+// Rz(+90) - see TABLET_RZ90 in JS, and the uv swap below follows from it.
+const float CAM_X = W * 0.5 - 4.25, CAM_Y = 0.0;
 
 // Antenna band across the side rails. MEASURED on 3.png at the established
 // 40.94 px/mm: 13.25 to 15.18 mm below the top edge, so 1.93 mm wide, and the
@@ -2160,6 +2165,52 @@ const float CAM_X = -(W * 0.5 - 4.25), CAM_Y = 0.0;
 // 13 mm below it and nothing in the reference speaks to it, so it does not.
 const float BAND_Y = 110.63, BAND_HW = 0.965;
 
+// --- side hardware ----------------------------------------------------------
+// Buttons are unioned onto the rails; the port and grilles are subtracted from
+// the bottom face. Both constructions are the phone's, unchanged in form.
+//
+// PROVENANCE. Every reference on Apple's M4 specs page was captured on the
+// 13-INCH: the dimensioned drawing measures aspect 1.3051 against the 13-inch's
+// 1.3067 (0.12% out, both axes agreeing on scale to 0.1%), where the 11-inch
+// would be 7.2% out. The corner radius is 14.4 mm there against 15.3 here -
+// essentially constant while the body is 12.8% longer - so positions near a
+// corner are mapped CORNER-RELATIVE (a feature 5.02 mm past the end of the arc
+// stays 5.02 mm past it), which moves them by under 1 mm. Sizes are the same
+// physical parts and carry over unchanged.
+//
+// The profile is a stadium, not a rounded rectangle, for the reason the phone's
+// note gives: the outline on the rail face is a pill whose ends are exact
+// semicircles of its own half depth.
+const float BTN_HZ = 1.20;    // half-width across the rail. ESTIMATE: the side
+                              // strip resolves the rail at only 4.4 px/mm, so
+                              // this is the visible stadium (2.4 +-0.5 mm),
+                              // cross-checked against the phone's depth
+                              // proportion, which would give 2.07.
+const float BTN_OUT = 0.15;   // overlap into the rail, as the phone
+const float BTN_HX = 0.77;    // 0.62 proud plus the overlap. The protrusion is
+                              // a subpixel edge fit, sd 0.01 mm, and came out
+                              // identical on both volume buttons.
+const float BTN_E = 0.18;
+const float VOL_HL = 5.215;                 // 10.43 mm buttons, both identical
+const float VOL1_CY = H * 0.5 - 25.395;     // centres, mapped corner-relative
+const float VOL2_CY = H * 0.5 - 37.275;     // 1.45 mm gap between them
+const float TOP_HL = 6.23;                  // 12.46 mm
+const float TOP_CX = W * 0.5 - 14.95 - 6.23;// right end 14.95 mm in from +x
+
+// USB-C: the same connector as the phone, so the phone's numbers, centred on
+// the bottom edge between the two grille arrays.
+const float PORT_HW = 4.25, PORT_HZ = 1.30, PORT_DEPTH = 5.0;
+// Speaker grilles. Round holes, not slots, and 1.51x the phone's hole diameter
+// at 1.06x its pitch - so they resolve for the same reason the phone's do. At
+// equal framing the larger body costs some of that back: a 1.45 mm hole here is
+// worth 0.85 mm on the phone against the phone's own 0.96, i.e. 0.89x. They
+// fade to a mean tone at the coarsest preview, exactly as the phone's do.
+// Scaled off the isometric by the 8.5 mm USB-C opening on that same edge, so
+// the isometric's foreshortening cancels.
+const float HOLE_R = 0.725, HOLE_SP = 2.18, HOLE_N = 14.0;
+const float HOLE_X0 = 21.0, HOLE_DEPTH = 1.2;
+const float CUT_RIM = 0.15;   // the phone's rim, chosen there by the same sweep
+
 float sdRRect(vec2 p, vec2 half_, float r) {
   vec2 q = abs(p) - half_ + r;
   return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
@@ -2171,14 +2222,89 @@ float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
   return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - edge;
 }
 
-// Two prisms and nothing else. No cuts, no buttons, no smax - the buttons and
-// the USB-C port wait on a reference that has not arrived, and keeping map()
-// this small is what lets the step count below be generous for free.
+// Polynomial smooth max, identical to max(a, b) once b is more than k below a.
+// The early return is what keeps it exact away from the cuts - see the phone's
+// note, which records ANGLE/D3D float32 divergence flipping knife-edge pixels
+// elsewhere on the body without it.
+float smax(float a, float b, float k) {
+  if (b < a - k) return a;
+  float h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) + k * h * (1.0 - h);
+}
+
+float cyl(float radial, float axial) {
+  return min(max(radial, axial), 0.0) + length(max(vec2(radial, axial), 0.0));
+}
+
+// Bounds a cut into the -y face, reaching 0.3 below it so the mouth always
+// opens cleanly through the surface.
+float finiteY(float y, float depth) {
+  float yc = -H * 0.5 + (depth - 0.3) * 0.5;
+  return abs(y - yc) - (depth + 0.3) * 0.5;
+}
+
+// One button. The stadium comes from sdPrism with the axes swizzled so the
+// rounded rect lies in the plane of the rail and its corner radius equals its
+// own half-width; extruding along the rail normal gives true semicircular ends.
+float sdButtonX(vec3 p, float cy, float halfLen) {
+  vec3 q = p - vec3(W * 0.5 - BTN_OUT, cy, 0.0);
+  return sdPrism(vec3(q.y, q.z, q.x), vec2(halfLen, BTN_HZ), BTN_HZ, BTN_HX, BTN_E);
+}
+float sdButtonY(vec3 p, float cx, float halfLen) {
+  vec3 q = p - vec3(cx, H * 0.5 - BTN_OUT, 0.0);
+  return sdPrism(vec3(q.x, q.z, q.y), vec2(halfLen, BTN_HZ), BTN_HZ, BTN_HX, BTN_E);
+}
+float sdButtons(vec3 p) {
+  float d = sdButtonX(p, VOL1_CY, VOL_HL);
+  d = min(d, sdButtonX(p, VOL2_CY, VOL_HL));
+  return min(d, sdButtonY(p, TOP_CX, TOP_HL));
+}
+
+// Port and grilles, subtracted from the bottom face. "radial" comes back as the
+// distance in the plane of that face; every cut is prismatic, so that is the
+// local aperture, which is what lets cavityVis be analytic.
+//
+// The grille is ONE hole evaluation for all 14 per side: |x| folds the two
+// arrays together and the cell index is CLAMPED rather than range-masked, so
+// the field stays continuous at the ends instead of presenting a cliff the
+// raymarcher can step straight through.
+float bottomCuts(vec3 p, out float radial) {
+  float hx = abs(p.x);
+  float portR = sdRRect(vec2(p.x, p.z), vec2(PORT_HW, PORT_HZ), PORT_HZ);
+  float port = cyl(portR, finiteY(p.y, PORT_DEPTH));
+  float i = clamp(floor((hx - HOLE_X0) / HOLE_SP + 0.5), 0.0, HOLE_N - 1.0);
+  float holeR = length(vec2(hx - (HOLE_X0 + i * HOLE_SP), p.z)) - HOLE_R;
+  float holes = cyl(holeR, finiteY(p.y, HOLE_DEPTH));
+  radial = min(portR, holeR);
+  return min(port, holes);
+}
+float sdBottomCuts(vec3 p) { float radial; return bottomCuts(p, radial); }
+
+// Fraction of the hemisphere a point inside a cut can still see. Without it a
+// 5 mm socket is lit exactly like an exposed face and reads as a bright plug
+// rather than a hole. Costs no extra field evaluation: the solid angle of an
+// aperture of half-width ap seen from depth h falls off as ap^2/(ap^2+h^2), and
+// ap is just the in-plane distance.
+float cavityVis(vec3 p) {
+  float radial;
+  float cut = bottomCuts(p, radial);
+  if (cut > 0.05) return 1.0;
+  float ap = max(-radial, 0.02);
+  float depth = max(p.y + H * 0.5, 0.0);
+  return clamp(ap * ap / (ap * ap + depth * depth), 0.0, 1.0);
+}
+
+// Body and bump unioned with the buttons, then the bottom cuts subtracted.
+// Verified offline before porting: buttons 10.43 mm at 0.620 proud with a
+// 1.45 mm gap, port 8.50 x 2.60 mm centred to 0.0000 and 5.00 mm deep, 14 holes
+// per side at 2.180 mm pitch and 1.45 mm across, and every cut clear of the
+// top edge, the side rails and both faces.
 float map(vec3 p) {
   float body = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
   float bump = sdPrism(p - vec3(BUMP_OX, BUMP_OY, BUMP_CZ),
                        vec2(BUMP_HW, BUMP_HH), BUMP_R, BUMP_T * 0.5, BUMP_E);
-  return min(body, bump);
+  float d = min(min(body, bump), sdButtons(p));
+  return smax(d, -sdBottomCuts(p), CUT_RIM);
 }
 
 vec3 normalAt(vec3 p) {
@@ -2339,8 +2465,12 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // object-space display is still portrait; swapping the axes here is what stops
   // the design coming out sideways. Done at the call site rather than inside
   // fitUV, which now has six copies that must stay identical.
-  float u  = uLandscape > 0.5 ? (p.y + SH) / (2.0 * SH) : (p.x + SW) / (2.0 * SW);
-  float v  = uLandscape > 0.5 ? (p.x + SW) / (2.0 * SW) : (SH - p.y) / (2.0 * SH);
+  // Under Rz(+90) object +x points up on screen and object +y points left, so
+  // the design's u follows -y and its v follows -x. Both terms are the reverse
+  // of what Rz(-90) needed; getting this wrong mirrors the design rather than
+  // failing visibly, so it is checked in the render sweep.
+  float u  = uLandscape > 0.5 ? (SH - p.y) / (2.0 * SH) : (p.x + SW) / (2.0 * SW);
+  float v  = uLandscape > 0.5 ? (SW - p.x) / (2.0 * SW) : (SH - p.y) / (2.0 * SH);
   float sa = uLandscape > 0.5 ? SW / SH : SH / SW;
 
   vec3 design = vec3(0.0);
@@ -2378,6 +2508,9 @@ vec4 shadeRay(vec2 fc, out float edge) {
   vec3 bodyF = uFinish * ab.x + ab.y;
   vec3 specR = envSpec(r, ROUGH_BODY), diffN = envSpec(nw, 0.95);
   vec3 metal = specR * bodyF + diffN * uFinish * max(vec3(0.0), 1.0 - bodyF) * BODY_K;
+  // The port and the grille holes are openings, not decals: without this they
+  // are lit exactly like the surrounding rail and read as printed dots.
+  metal *= cavityVis(p);
 
   // The bump's optics, painted on its top face. They stand at most 0.52mm proud
   // of the housing, which is under a pixel at any Studio framing, so modelling
@@ -2421,8 +2554,9 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // outline, and the EDGE chamfer. edge is write-only with one ray, so this is
   // dropped by the compiler and kept as documentation, as in STUDIO_FRAG.
   float dBody = sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE);
-  float dBump = sdPrism(p - vec3(BUMP_OX, BUMP_OY, BUMP_CZ),
-                        vec2(BUMP_HW, BUMP_HH), BUMP_R, BUMP_T * 0.5, BUMP_E);
+  float dBump = min(sdPrism(p - vec3(BUMP_OX, BUMP_OY, BUMP_CZ),
+                            vec2(BUMP_HW, BUMP_HH), BUMP_R, BUMP_T * 0.5, BUMP_E),
+                    sdButtons(p));
   float dRail = sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - EDGE, CORNER - EDGE);
   float dFace = abs(p.z) - (D * 0.5 - EDGE);
   if (min(dBody, dBump) > -2.0 * pxmm || abs(dGlass) < 2.0 * aa ||
@@ -3189,8 +3323,10 @@ const TABLET_RADIUS = Math.hypot(Math.hypot(TABLET.W / 2, TABLET.H / 2), TABLET.
 // Landscape is a 90 degree post-rotation applied to the BODY here, never a
 // change to state.rz: that slider clamps to +-45, and the next input event
 // would write the clamped value back and silently snap out of landscape.
-// Rz(-90) so the long edge carrying the front camera swings to the top.
-const TABLET_RZ90 = rotationMatrix(0, 0, -90);
+// Rz(+90), not -90: the dimensioned reference puts the front camera and the
+// volume buttons on the +x long edge, and +90 is the direction that carries
+// that edge to the top. TABLET_FRAG's landscape uv swap depends on this sign.
+const TABLET_RZ90 = rotationMatrix(0, 0, 90);
 function tabletShown() { return state.mode === 'studio' && state.studioDevice === 'tablet'; }
 // Object -> world for the tablet, including the orientation fold. R * Rz90, not
 // Rz90 * R: the body turns and the camera angles still mean what they say.
