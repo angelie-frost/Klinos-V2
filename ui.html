@@ -909,13 +909,62 @@ float sdNotch(vec2 p, float sh) {
 // along x, with the corner radius equal to that half depth.
 const float BTN_HZ = 1.5, BTN_HX = 0.55, BTN_OUT = 0.15;
 
+// SIM tray. Measured on Apple's own diagram (support.apple.com/en-ph/111872)
+// and the iPhone 13 launch photography. It sits on the SAME rail as the volume
+// buttons and the ring switch - Apple's callouts 4, 5 and 6 all attach to the
+// left edge, only 2 to the right - not opposite them. Centre 113.4mm from the
+// top. The length is 1.52x a volume button measured in the same photo, a ratio
+// that survives the 3/4 foreshortening, which is the robust part of it; the
+// absolute 19.1mm inherits the button's own length and is good to about 0.5mm.
+// A cut rather than a union: it is a seam whose edge catches light at grazing
+// angles, the same argument LAPTOP_FRAG records for cutting its side ports
+// instead of painting them.
+const float SIM_CY = -40.0, SIM_HL = 9.55, SIM_HZ = 1.21, SIM_DEPTH = 0.35;
+
+// Antenna lines, measured on the same photography: 4.49mm below the top and
+// 8.94mm above the bottom, both 1.68mm thick - the two thicknesses were
+// measured independently and agreed to the pixel. Both land ON the corner arc,
+// not the straight rail, which ends at H*0.5 - CORNER = 61.35; the surface
+// normal there is about (0.78, 0.63, 0), so the mask keys off "is this a side
+// wall" via n.z rather than the tablet's abs(n.x), which would fade to 0.78.
+// Assumed symmetric across both rails, as the tablet's band is: the photo
+// shows one rail.
+//
+// Painted, not cut: the line is a plastic-filled split flush with the
+// aluminium, so there is no depth for a groove to represent.
+//
+// THREE models were tried before this one, and all three are recorded because
+// each looked right on paper. A colour-matched dielectric insert caps BELOW
+// 1.0 - it loses the metal F0 - so it cannot produce a line brighter than its
+// rail at all. A fixed-brightness insert needs an albedo of 5.9. A polished
+// strip (ROUGH_LIP against ROUGH_BODY, the idiom already on this body) was
+// built and measured on the GPU: it DARKENS to 0.76 sRGB where the photo wants
+// 1.16-1.24, because a sharper reflection of this environment is darker than
+// the blurred one, and the sign would flip with the view angle anyway.
+//
+// So a measured tone, as the tablet's band and KB_CAPTONE are. ANT_TONE is
+// LINEAR: encode() here is Reinhard plus gamma, so the sRGB ratio cannot be
+// fed in directly - solved numerically at the rail's own level, 1.952 gives
+// the measured 1.199, where feeding 1.199 itself would give 1.055. That exact
+// mistake shipped once on the tablet's antenna band.
+//
+// One constant covers all four finishes, unlike the tablet's two. The Reinhard
+// compresses the difference: predicted 1.199 on Silver/Pink/Gold and 1.223 on
+// Midnight. Only Pink is measured against a real reference - every attached
+// photo is Pink - so the other three are modelled, not verified.
+const float ANT_TOP = 68.86, ANT_BOT = -64.41, ANT_HW = 0.84, ANT_TONE = 1.952;
+
 float sdButton(vec3 p, float side, float cy, float halfLen) {
   vec3 q = p - vec3(side * (W * 0.5 - BTN_OUT), cy, 0.0);
   return sdPrism(vec3(q.y, q.z, q.x), vec2(halfLen, BTN_HZ), BTN_HZ, BTN_HX, 0.18);
 }
 
 float sdButtons(vec3 p) {
-  float d = sdButton(p, -1.0, 46.5, 4.0);      // action button
+  // Ring/silent switch. 49.63 / 3.30 measured on Apple's diagram and confirmed
+  // by the launch photo, where centre-spacing over button-length reads 1.267
+  // against the diagram's 1.288; the old 46.5 / 4.0 gave 1.167. Corrected
+  // deliberately in the SIM-tray pass - this moves the switch 3.1mm.
+  float d = sdButton(p, -1.0, 49.63, 3.30);    // ring/silent switch
   d = min(d, sdButton(p, -1.0, 33.5, 6.0));    // volume up
   d = min(d, sdButton(p, -1.0, 19.5, 6.0));    // volume down
   d = min(d, sdButton(p,  1.0, 28.0, 12.5));   // side button
@@ -964,6 +1013,17 @@ float sdBottomCuts(vec3 p) {
   return bottomCuts(p, radial);
 }
 
+// Shallow stadium slot in the -x rail: the sdButton swizzle again, but the
+// extrusion along x runs from 0.3 OUTSIDE the rail to SIM_DEPTH inside, the way
+// finiteY does it for the bottom cuts, so the mouth always opens cleanly through
+// the face however the rim is smoothed.
+float sdSimTray(vec3 p) {
+  vec3 q = vec3(p.x + W * 0.5, p.y - SIM_CY, p.z);
+  float profile = sdRRect(vec2(q.y, q.z), vec2(SIM_HL, SIM_HZ), SIM_HZ);
+  float axial = abs(q.x - (SIM_DEPTH - 0.3) * 0.5) - (SIM_DEPTH + 0.3) * 0.5;
+  return cyl(profile, axial);
+}
+
 // Fraction of the hemisphere a point inside a cut can still see.
 //
 // Nothing else in this shader occludes anything, so without it a 5mm deep USB-C
@@ -1010,7 +1070,9 @@ float map(vec3 p) {
   vec3 q = p - vec3(BUMP_OX, BUMP_OY, -(D * 0.5 + BUMP_D * 0.5 - 0.4));
   float bump = sdPrism(q, vec2(BUMP_W * 0.5, BUMP_H * 0.5), BUMP_R, BUMP_D * 0.5, 0.8);
   float d = min(min(body, bump), sdButtons(p));
-  return smax(d, -sdBottomCuts(p), CUT_RIM);
+  // one smax, not two: the tray joins the bottom cuts as a union of cuts, so the
+  // rim radius stays a single smoothing instead of compounding.
+  return smax(d, -min(sdBottomCuts(p), sdSimTray(p)), CUT_RIM);
 }
 
 vec3 normalAt(vec3 p) {
@@ -1215,8 +1277,18 @@ vec4 shadeRay(vec2 fc, out float edge) {
   vec3 r = reflect(-vw, nw);
   float ndv = clamp(dot(nw, vw), 0.0, 1.0);
   vec3 F = fres(vec3(COAT_F0) + (uFinish - vec3(COAT_F0)) * COAT_MIX, ndv);
+  // Antenna lines. Rail-local footprint, as the tablet's baa - NOT the aa above,
+  // which is specialised to the glass plane. sideA keeps the strip off the front
+  // and back faces; the y slab keeps it off the top and bottom ones, clearing
+  // them by 3.65 and 8.10mm.
+  float raa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
+  float sideA = 1.0 - smoothstep(0.45, 0.70, abs(n.z));
+  float antA = sideA * max(
+      1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_TOP)),
+      1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT)));
   vec3 metal = envSpec(r, mix(ROUGH_BODY, ROUGH_LIP, lipA)) * F
              + envSpec(nw, 0.95) * uFinish * (1.0 - F) * BODY_K;
+  metal *= mix(1.0, ANT_TONE, antA);
   metal *= cavityVis(p);
 
   // Fine dark gap where the glass meets the band. Real on the device, and it
@@ -1244,9 +1316,12 @@ vec4 shadeRay(vec2 fc, out float edge) {
                         vec2(BUMP_W * 0.5, BUMP_H * 0.5), BUMP_R, BUMP_D * 0.5, 0.8);
   float dBtn = sdButtons(p);
   float crease = max(min(dBody, dBump), min(max(dBody, dBump), dBtn));
+  // The tray's rim is a crease too, and geometry left out of this test renders
+  // with one ray where it needs the extra ones.
+  float dSim = abs(sdSimTray(p));
   float dRail = sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - EDGE, CORNER - EDGE);
   float dFace = abs(p.z) - (D * 0.5 - EDGE);
-  if (crease < 2.0 * pxmm || abs(dGlass) < 2.0 * aa ||
+  if (crease < 2.0 * pxmm || dSim < 2.0 * pxmm || abs(dGlass) < 2.0 * aa ||
       (dRail > -2.0 * pxmm && dFace > -2.0 * pxmm)) edge = 1.0;
 
   return vec4(col, cover);
