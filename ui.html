@@ -248,7 +248,11 @@
      grouped gallery of preset thumbnails, after Office's 3-D rotation menu. */
   .anglebtn { display: flex; align-items: center; gap: 10px; padding: 5px 12px 5px 6px; text-align: left; }
   .anglebtn canvas { width: 28px; height: 28px; flex: none; }
-  #presetname { flex: 1; }
+  /* The label absorbs the slack so the chevron sits hard right. Structural,
+     not by id, so every disclosure built on .anglebtn gets it - Device was
+     shipped with its chevron tucked against its label because the rule it
+     needed named #presetname alone. */
+  .anglebtn > span:not(.chev) { flex: 1; }
   .chev {
     width: 7px; height: 7px; flex: none; margin: 0 2px 3px 0;
     border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2);
