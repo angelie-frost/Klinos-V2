@@ -922,12 +922,34 @@ const float BTN_HZ = 1.5, BTN_HX = 0.55, BTN_OUT = 0.15;
 // instead of painting them.
 const float SIM_CY = -40.0, SIM_HL = 9.55, SIM_HZ = 1.21, SIM_DEPTH = 0.35;
 
-// Antenna lines, measured on the same photography: 4.49mm below the top and
-// 8.94mm above the bottom, both 1.68mm thick - the two thicknesses were
-// measured independently and agreed to the pixel. Both land ON the corner arc,
-// not the straight rail, which ends at H*0.5 - CORNER = 61.35; the surface
-// normal there is about (0.78, 0.63, 0), so the mask keys off "is this a side
-// wall" via n.z rather than the tablet's abs(n.x), which would fade to 0.78.
+// Antenna lines. DELIBERATELY NOT WHERE THE REAL FEATURE IS - read this before
+// "correcting" the position.
+//
+// MEASURED: the real iPhone 13's line sits 4.18-5.77mm from the top, i.e. ON
+// the corner arc, which ends at H*0.5 - CORNER = 61.35 (12.00mm in). That is
+// confirmed, not assumed: the reference resolves at 18.2 px/mm with 1.6% noise
+// and its datum is pinned by five button seams matching Apple's diagram within
+// 0.4mm. An edge-sharpness test separates it from the corner's own shading -
+// the known curvature gradient measures 3.901mm against a 0.495mm blur limit
+// while the line's edges measure 0.110/0.549mm, so it is a material step.
+//
+// RENDERED at 60.85 / -62.25 instead, just past the arc on the flat rail. A
+// line this thin does not read cleanly across this shader's curved surface at
+// Studio scale - it smears and aliases through the corner, which is a shading
+// and sampling limitation, not a position error. Angelie's call, made with the
+// measurement in hand: a feature that reads correctly in the wrong place beats
+// one that reads as mush in the right place.
+//
+// So do NOT move these back to the arc on the strength of re-measuring the
+// photos - the photos are not in dispute and that has already cost one wrong
+// round trip. Move them back only after the curved-surface line rendering is
+// fixed, and verify the line reads cleanly through the corner before doing it.
+//
+// Everything else is unchanged and still measured: 1.68mm thick (ANT_HW), the
+// per-finish brightening in PHONE_ANT, and the mask. The mask still keys off
+// "is this a side wall" via n.z; that was chosen because the arc's normal is
+// about (0.78, 0.63, 0) where the tablet's abs(n.x) would fade to 0.78, and on
+// the flat rail it is simply equivalent, so it stays rather than churn.
 // Assumed symmetric across both rails, as the tablet's band is: the photo
 // shows one rail.
 //
@@ -957,7 +979,7 @@ const float SIM_CY = -40.0, SIM_HL = 9.55, SIM_HZ = 1.21, SIM_DEPTH = 0.35;
 // finish colour (the slope) and ADDS a fixed scatter (the intercept). That is
 // also why the two single-mechanism models above each failed - each had half
 // of it.
-const float ANT_TOP = 68.86, ANT_BOT = -64.41, ANT_HW = 0.84;
+const float ANT_TOP = 60.85, ANT_BOT = -62.25, ANT_HW = 0.84;
 
 float sdButton(vec3 p, float side, float cy, float halfLen) {
   vec3 q = p - vec3(side * (W * 0.5 - BTN_OUT), cy, 0.0);
