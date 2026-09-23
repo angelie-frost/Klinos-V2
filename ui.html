@@ -922,42 +922,41 @@ const float BTN_HZ = 1.5, BTN_HX = 0.55, BTN_OUT = 0.15;
 // instead of painting them.
 const float SIM_CY = -40.0, SIM_HL = 9.55, SIM_HZ = 1.21, SIM_DEPTH = 0.35;
 
-// Antenna lines, measured on the same photography: 4.49mm below the top and
-// 8.94mm above the bottom, both 1.68mm thick - the two thicknesses were
-// measured independently and agreed to the pixel. Both land ON the corner arc,
-// not the straight rail, which ends at H*0.5 - CORNER = 61.35; the surface
-// normal there is about (0.78, 0.63, 0), so the mask keys off "is this a side
-// wall" via n.z rather than the tablet's abs(n.x), which would fade to 0.78.
-// Assumed symmetric across both rails, as the tablet's band is: the photo
-// shows one rail.
+// Antenna lines. TWICE measured wrong before this: both earlier passes locked
+// onto the wrong feature. A luminance profile along the rail at 8 px/mm shows
+// TWO things near each end - a broad BRIGHT hump peaking 4.25mm in, about 5mm
+// wide, and a narrow DARK dip at 12.85mm, about 1.5mm wide. The bright hump is
+// the corner rolling over into the light, which the geometry already produces;
+// the dark dip is the antenna line. The old constants sat on the hump, so the
+// shader was brightening an already-bright corner highlight and calling it an
+// antenna line - which is exactly how it looked, a line on the rounded corner.
 //
-// Painted, not cut: the line is a plastic-filled split flush with the
-// aluminium, so there is no depth for a groove to represent.
+// The line sits just PAST the corner, on the flat rail. A circle fit to the arc
+// in Apple's front-view diagram gives 12.00mm against this file's CORNER = 12.0
+// (0.21px mean residual over 55 points), so the model's corner is right and the
+// straight rail begins 12.00mm from each end in both.
 //
-// THREE models were tried before this one, and all three are recorded because
-// each looked right on paper. A colour-matched dielectric insert caps BELOW
-// 1.0 - it loses the metal F0 - so it cannot produce a line brighter than its
-// rail at all. A fixed-brightness insert needs an albedo of 5.9. A polished
-// strip (ROUGH_LIP against ROUGH_BODY, the idiom already on this body) was
-// built and measured on the GPU: it DARKENS to 0.76 sRGB where the photo wants
-// 1.16-1.24, because a sharper reflection of this environment is darker than
-// the blurred one, and the sign would flip with the view angle anyway.
+// It is DARKER than the rail, not brighter - the previous sign was part of the
+// same mistake. Six real finishes under one light give 0.636 Midnight to 0.939
+// Starlight, fitting band = 0.9088 * rail - 0.0295 in linear space, R^2 0.9962.
+// That is both a tighter fit than the wrong feature gave and a sane material -
+// the insert returns about 91% of what the rail does, where the old reading
+// needed an albedo of 5.9 to explain itself. It also runs the same direction as
+// the tablet's band (Space Black 0.546, Silver 0.892), which is the check that
+// it is right this time. Green appears in both references and reads 0.701 and
+// 0.674/0.729, which is the cross-image check.
 //
-// So a measured tone, as the tablet's band and KB_CAPTONE are. The tone is
-// LINEAR: encode() here is Reinhard plus gamma, so an sRGB ratio cannot be fed
-// in directly - each value is solved numerically at that finish's own rail
-// level. Feeding the sRGB number itself would give 1.055 where 1.199 was
-// wanted; that exact mistake shipped once on the tablet's antenna band.
+// Painted, not cut: a plastic-filled split flush with the aluminium, no depth.
+// PER FINISH via uPhoneAnt - see PHONE_ANT - and LINEAR, because encode() here
+// is Reinhard plus gamma, so an sRGB ratio cannot be fed in directly. Both
+// rails carry both lines; the earlier +x asymmetry was an artefact of hunting
+// for a bright band.
 //
-// PER FINISH, arriving as uPhoneAnt - see PHONE_ANT. A single constant was
-// tried first and is disproven: 1.952 renders 1.324 on Midnight against a
-// measured 1.586, and 1.245 on Pink against 1.170. Six real finishes measured
-// under one light fit band = 1.137 * rail + 0.219 in linear photo space
-// (R^2 0.949), which is why no single number works: the band both TRACKS the
-// finish colour (the slope) and ADDS a fixed scatter (the intercept). That is
-// also why the two single-mechanism models above each failed - each had half
-// of it.
-const float ANT_TOP = 68.86, ANT_BOT = -64.41, ANT_HW = 0.84;
+// The BOTTOM line is weaker evidence than the top one, deliberately kept: its
+// contrast is about half, and the six-finish reference cannot resolve it at
+// 2.7 px/mm. -62.25 is the one position two rails agree on. It sits 0.9mm
+// inside the arc rather than on the flat, which is what was measured.
+const float ANT_TOP = 60.85, ANT_BOT = -62.25, ANT_HW = 0.84;
 
 float sdButton(vec3 p, float side, float cy, float halfLen) {
   vec3 q = p - vec3(side * (W * 0.5 - BTN_OUT), cy, 0.0);
@@ -1288,15 +1287,9 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // them by 3.65 and 8.10mm.
   float raa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
   float sideA = 1.0 - smoothstep(0.45, 0.70, abs(n.z));
-  // The rails are NOT symmetric. A full-length scan of the +x rail finds the
-  // top band and nothing in the bottom 20mm - max residual 0.0-0.2 sd against a
-  // clearly detected top band in the same scan at the same resolution, so the
-  // detector works there and this is a real absence, not a miss. Top band on
-  // both rails, bottom band on -x only.
-  float minusX = smoothstep(0.10, 0.45, -n.x);
   float antA = sideA * max(
       1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_TOP)),
-      minusX * (1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT))));
+      1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT)));
   vec3 metal = envSpec(r, mix(ROUGH_BODY, ROUGH_LIP, lipA)) * F
              + envSpec(nw, 0.95) * uFinish * (1.0 - F) * BODY_K;
   metal *= mix(1.0, uPhoneAnt, antA);
@@ -3540,20 +3533,22 @@ const FINISHES = {
 };
 
 // Antenna line vs the rail beside it, per finish, as a LINEAR multiply - see
-// STUDIO_FRAG's ANT_* block for why it cannot be one number and why the value
-// is not the sRGB ratio. Midnight and Pink are measured directly off Apple's
-// six-finish side-profile lineup: 1.586 and 1.170 sRGB, recovered by the
-// integrated excess rather than the peak, because at 2.7 px/mm a 1.68mm band
-// is 4.5px and blur eats the peak unevenly. Pink is the control - it came back
-// 1.170 against the 1.162-1.236 measured on a high-resolution photo.
+// STUDIO_FRAG's ANT_* block for why it cannot be one number, why it DARKENS,
+// and why the two earlier passes measured the wrong feature entirely.
 //
-// Silver and Gold DO NOT EXIST on the real iPhone 13 (its lineup is Red,
-// Starlight, Midnight, Blue, Pink, Green), so nothing measures them. They come
-// from the band = 1.137 * rail + 0.219 fit over all six real finishes, which
-// is tight in exactly their brightness range - residuals 0.006 and 0.038 for
-// the two bright real finishes - and whose large error at the dark end does
-// not reach them. The finish-lineup mismatch is a separate question.
-const PHONE_ANT = { Silver: 1.596, Midnight: 3.079, Pink: 1.593, Gold: 1.646 };
+// Midnight and Pink are measured directly off Apple's six-finish side-profile
+// lineup: 0.636 and 0.939 sRGB, recovered by the integrated deficit rather
+// than the peak, because at 2.7 px/mm a 1.5mm line is 4px and blur eats the
+// peak unevenly. Green appears in both references and reads 0.701 against
+// 0.674/0.729 at 8 px/mm, which is the cross-image control.
+//
+// Silver and Gold DO NOT EXIST on the real iPhone 13 (Red, Starlight, Midnight,
+// Blue, Pink, Green), so nothing measures them. They come from the six-finish
+// fit band = 0.9088 * rail - 0.0295 (R^2 0.9962), re-anchored on the two direct
+// measurements in the RENDER's own space - the photo's levels and the render's
+// are differently exposed, and using the photo fit directly put Silver at 0.839
+// while Pink, whose rail renders within 0.7 of it, measured 0.939.
+const PHONE_ANT = { Silver: 0.849, Midnight: 0.357, Pink: 0.854, Gold: 0.842 };
 
 // The laptop's own list, Apple's two MacBook Pro finishes. Separate from FINISHES
 // so the phone's chips don't change, and because the phone's Silver is bluish where
