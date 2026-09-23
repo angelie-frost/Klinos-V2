@@ -1305,11 +1305,36 @@ vec4 shadeRay(vec2 fc, out float edge) {
   float ndv = clamp(dot(nw, vw), 0.0, 1.0);
   vec3 F = fres(vec3(COAT_F0) + (uFinish - vec3(COAT_F0)) * COAT_MIX, ndv);
   // Antenna lines. Rail-local footprint, as the tablet's baa - NOT the aa above,
-  // which is specialised to the glass plane. sideA keeps the strip off the front
-  // and back faces; the y slab keeps it off the top and bottom ones, clearing
-  // them by 3.65 and 8.10mm.
+  // which is specialised to the glass plane. The y slab keeps the strip off the
+  // top and bottom faces, clearing them by 3.65 and 8.10mm.
+  //
+  // sideA spans the WHOLE aluminium band: the rail AND the chamfers either side
+  // of it, stopping only at the two flat faces. The line is a split in the band,
+  // so it crosses the lip and stops where the metal stops - measured at 8 px/mm
+  // it reads 0.415 on the lip against 0.659 on the rail, and 0.995 on the glass,
+  // i.e. nothing there. 0.93/0.99 is what actually reaches the lip's bright
+  // peak: 0.45/0.70 stopped 6px short of it and 0.80/0.95 still stopped 2px
+  // short. The loose bound also brings in the BACK chamfer, which the same
+  // reference shows carrying the line at 0.593, so that is right rather than
+  // incidental.
+  //
+  // KNOWN, ACCEPTED APPROXIMATION - do not silently "correct" this. The lip is
+  // given the RAIL's tone, unchanged. It should not be: the lip's contrast
+  // against its rail measures about 1.6x the rail's own contrast (0.415 against
+  // 0.659 on the one finish that resolves), where reusing the rail tone renders
+  // it at about 1.0x. The lip is therefore under-rendered by roughly that
+  // factor. It is stated as a contrast MAGNITUDE rather than a darkening ratio
+  // because that pair comes from the reference where the line reads darker than
+  // its rail, while this tone brightens - the magnitude carries over, the sign
+  // does not.
+  //
+  // A measured lip tone needs a front-angle reference at 8 px/mm or better on
+  // Midnight and Pink, which is not being pursued. A mechanism was tried instead
+  // and failed: suppressing the polish inside the band gave lip/rail 1.04-1.12
+  // where 0.63 was wanted - it BRIGHTENS the lip, because raising roughness
+  // brightens in this environment. Do not retry that without new evidence.
   float raa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
-  float sideA = 1.0 - smoothstep(0.45, 0.70, abs(n.z));
+  float sideA = 1.0 - smoothstep(0.93, 0.99, abs(n.z));
   // The rails are NOT symmetric. A full-length scan of the +x rail finds the
   // top band and nothing in the bottom 20mm - max residual 0.0-0.2 sd against a
   // clearly detected top band in the same scan at the same resolution, so the
