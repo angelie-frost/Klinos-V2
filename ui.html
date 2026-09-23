@@ -827,6 +827,7 @@ uniform float uHasTex;
 uniform float uSrcAspect, uFitMode;
 uniform vec2 uImgPan;      // crop offset, in screen uv
 uniform float uImgZoom;    // >1 magnifies the design inside the display
+uniform float uPhoneAnt;   // antenna line vs the rail, per finish - see PHONE_ANT
 
 const float W = 71.5, H = 146.7, D = 7.65;
 const float CORNER = 12.0, EDGE = 1.15, BEZEL = 2.4, SCREEN_R = 9.6;
@@ -942,17 +943,21 @@ const float SIM_CY = -40.0, SIM_HL = 9.55, SIM_HZ = 1.21, SIM_DEPTH = 0.35;
 // 1.16-1.24, because a sharper reflection of this environment is darker than
 // the blurred one, and the sign would flip with the view angle anyway.
 //
-// So a measured tone, as the tablet's band and KB_CAPTONE are. ANT_TONE is
-// LINEAR: encode() here is Reinhard plus gamma, so the sRGB ratio cannot be
-// fed in directly - solved numerically at the rail's own level, 1.952 gives
-// the measured 1.199, where feeding 1.199 itself would give 1.055. That exact
-// mistake shipped once on the tablet's antenna band.
+// So a measured tone, as the tablet's band and KB_CAPTONE are. The tone is
+// LINEAR: encode() here is Reinhard plus gamma, so an sRGB ratio cannot be fed
+// in directly - each value is solved numerically at that finish's own rail
+// level. Feeding the sRGB number itself would give 1.055 where 1.199 was
+// wanted; that exact mistake shipped once on the tablet's antenna band.
 //
-// One constant covers all four finishes, unlike the tablet's two. The Reinhard
-// compresses the difference: predicted 1.199 on Silver/Pink/Gold and 1.223 on
-// Midnight. Only Pink is measured against a real reference - every attached
-// photo is Pink - so the other three are modelled, not verified.
-const float ANT_TOP = 68.86, ANT_BOT = -64.41, ANT_HW = 0.84, ANT_TONE = 1.952;
+// PER FINISH, arriving as uPhoneAnt - see PHONE_ANT. A single constant was
+// tried first and is disproven: 1.952 renders 1.324 on Midnight against a
+// measured 1.586, and 1.245 on Pink against 1.170. Six real finishes measured
+// under one light fit band = 1.137 * rail + 0.219 in linear photo space
+// (R^2 0.949), which is why no single number works: the band both TRACKS the
+// finish colour (the slope) and ADDS a fixed scatter (the intercept). That is
+// also why the two single-mechanism models above each failed - each had half
+// of it.
+const float ANT_TOP = 68.86, ANT_BOT = -64.41, ANT_HW = 0.84;
 
 float sdButton(vec3 p, float side, float cy, float halfLen) {
   vec3 q = p - vec3(side * (W * 0.5 - BTN_OUT), cy, 0.0);
@@ -1283,12 +1288,18 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // them by 3.65 and 8.10mm.
   float raa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
   float sideA = 1.0 - smoothstep(0.45, 0.70, abs(n.z));
+  // The rails are NOT symmetric. A full-length scan of the +x rail finds the
+  // top band and nothing in the bottom 20mm - max residual 0.0-0.2 sd against a
+  // clearly detected top band in the same scan at the same resolution, so the
+  // detector works there and this is a real absence, not a miss. Top band on
+  // both rails, bottom band on -x only.
+  float minusX = smoothstep(0.10, 0.45, -n.x);
   float antA = sideA * max(
       1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_TOP)),
-      1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT)));
+      minusX * (1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT))));
   vec3 metal = envSpec(r, mix(ROUGH_BODY, ROUGH_LIP, lipA)) * F
              + envSpec(nw, 0.95) * uFinish * (1.0 - F) * BODY_K;
-  metal *= mix(1.0, ANT_TONE, antA);
+  metal *= mix(1.0, uPhoneAnt, antA);
   metal *= cavityVis(p);
 
   // Fine dark gap where the glass meets the band. Real on the device, and it
@@ -3528,6 +3539,22 @@ const FINISHES = {
   Gold: [0.80, 0.68, 0.47]
 };
 
+// Antenna line vs the rail beside it, per finish, as a LINEAR multiply - see
+// STUDIO_FRAG's ANT_* block for why it cannot be one number and why the value
+// is not the sRGB ratio. Midnight and Pink are measured directly off Apple's
+// six-finish side-profile lineup: 1.586 and 1.170 sRGB, recovered by the
+// integrated excess rather than the peak, because at 2.7 px/mm a 1.68mm band
+// is 4.5px and blur eats the peak unevenly. Pink is the control - it came back
+// 1.170 against the 1.162-1.236 measured on a high-resolution photo.
+//
+// Silver and Gold DO NOT EXIST on the real iPhone 13 (its lineup is Red,
+// Starlight, Midnight, Blue, Pink, Green), so nothing measures them. They come
+// from the band = 1.137 * rail + 0.219 fit over all six real finishes, which
+// is tight in exactly their brightness range - residuals 0.006 and 0.038 for
+// the two bright real finishes - and whose large error at the dark end does
+// not reach them. The finish-lineup mismatch is a separate question.
+const PHONE_ANT = { Silver: 1.596, Midnight: 3.079, Pink: 1.593, Gold: 1.646 };
+
 // The laptop's own list, Apple's two MacBook Pro finishes. Separate from FINISHES
 // so the phone's chips don't change, and because the phone's Silver is bluish where
 // the MacBook's is neutral. apple.com gives names only, so these are calibrated on
@@ -3666,6 +3693,8 @@ function renderStudio(canvas, W, H) {
     gl.uniform1f(u('uAspect'), VW / VH);
     const fin = FINISHES[state.finish] || FINISHES.Silver;
     gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+    gl.uniform1f(u('uPhoneAnt'), PHONE_ANT[state.finish] != null
+                                 ? PHONE_ANT[state.finish] : 1.0);
     gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
     gl.uniform1f(u('uSrcAspect'), srcAspect);
     gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
