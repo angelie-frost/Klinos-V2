@@ -186,6 +186,23 @@
   .slider:last-child { margin-bottom: 0; }
   .slider .name { width: 76px; color: var(--ink-2); font-size: 12.5px; flex: none; }
   .slider .val { width: 46px; text-align: right; flex: none; font-size: 13px; }
+  /* Info icon before a slider label, paired the way the dial labels pair theirs.
+     Hover or keyboard focus shows the tip; a click pins it (registerPopover owns
+     the pinned state through `hidden`, so hover never fights it). */
+  .slider .name.withinfo { display: flex; align-items: center; gap: 5px; }
+  .infowrap { position: relative; display: inline-flex; }
+  .info {
+    display: inline-flex; padding: 0; border: 0; border-radius: 50%;
+    background: none; color: var(--ink-2); cursor: pointer;
+  }
+  .info:hover, .info[aria-expanded="true"] { color: var(--ink); }
+  .info .icon { width: 14px; height: 14px; color: inherit; }
+  .tip {
+    position: absolute; left: -4px; top: calc(100% + 6px); z-index: 5; width: 236px;
+    padding: 9px 11px; border-radius: 10px; background: var(--ink); color: #fff;
+    font-size: 12px; line-height: 1.45; box-shadow: 0 6px 20px rgba(0,0,0,.18);
+  }
+  .infowrap:not(.quiet):hover .tip, .infowrap:not(.quiet) .info:focus-visible + .tip { display: block; }
   .val b { font-weight: 600; }
   .val i { font-style: normal; color: var(--ink-3); }
 
@@ -350,6 +367,7 @@
     <div class="anglemenu" id="devicemenu" hidden></div>
     <div class="sub">Finish</div>
     <div class="chips" id="finishes"></div>
+    <div class="slider" style="margin-top:12px"><span class="name withinfo"><span class="infowrap"><button class="info" id="lightinfo" type="button" aria-label="About lighting" aria-expanded="false" aria-describedby="lighttip"></button><span class="tip" id="lighttip" role="tooltip" hidden>Studio mode has its own lighting, set up and colour-matched for each device and finish. This slider makes that lighting brighter or dimmer overall. It doesn&rsquo;t move the lights or change their balance. 100% is the calibrated look.</span></span>Lighting</span><input type="range" id="light" min="50" max="110" value="100"><span class="val" id="lighto"></span></div>
   </div>
   <div id="photobox" style="display:none">
     <div class="sub">Inspiration photo</div>
@@ -843,6 +861,7 @@ uniform mat3  uRot;      // object -> world, for normals
 uniform mat3  uRotT;     // world -> object, for rays
 uniform float uCamZ, uTanHalf, uAspect;
 uniform vec3  uFinish;
+uniform float uLight;    // overall studio light, 1 = the calibrated rig - see environment()
 uniform sampler2D uTex;
 uniform float uHasTex;
 uniform float uSrcAspect, uFitMode;
@@ -1154,7 +1173,9 @@ vec3 environment(vec3 d, float rough) {
   col += softbox(d, normalize(vec3( 0.14, 0.58,-0.82)), vec2(0.50, 0.28), vec3(1.00, 0.95, 0.88), 3.0, 0.42, rough);
   // the box the glass reflects: without it the screen is correct and lifeless
   col += softbox(d, normalize(vec3(-0.30, 0.34, 0.89)), vec2(0.50, 0.70), vec3(1.0), 3.4, 0.55, rough);
-  return col;
+  // The Lighting slider. One factor on the whole rig, ambient included, so the
+  // softboxes keep their balance; 1.0 leaves every value exactly as calibrated.
+  return col * uLight;
 }
 
 // Rough specular lobe, by sampling the environment on a ring around the
@@ -1480,6 +1501,7 @@ uniform float uRadius;   // bounding-sphere radius about uCenter; bounds the mar
 uniform vec3  uCenter;   // rotation pivot in object space, recomputed per lid angle
 uniform vec2  uLidCS;    // cos, sin of the lid angle
 uniform vec3  uFinish;
+uniform float uLight;    // overall studio light, 1 = the calibrated rig - see environment()
 uniform sampler2D uTex;
 uniform sampler2D uLegend;   // KB_LEGENDS: LUMINANCE map of the cap print
 uniform float uHasTex;
@@ -1933,7 +1955,9 @@ vec3 environment(vec3 d, float rough) {
   col += softbox(d, normalize(vec3( 0.88, 0.12, 0.36)), vec2(0.40, 0.62), vec3(0.86, 0.90, 1.00), 2.6, 0.48, rough);
   col += softbox(d, normalize(vec3( 0.14, 0.58,-0.82)), vec2(0.50, 0.28), vec3(1.00, 0.95, 0.88), 3.0, 0.42, rough);
   col += softbox(d, normalize(vec3(-0.30, 0.34, 0.89)), vec2(0.50, 0.70), vec3(1.0), 3.4, 0.55, rough);
-  return col;
+  // The Lighting slider. One factor on the whole rig, ambient included, so the
+  // softboxes keep their balance; 1.0 leaves every value exactly as calibrated.
+  return col * uLight;
 }
 
 vec3 envSpec(vec3 d, float rough) {
@@ -2290,6 +2314,7 @@ uniform float uRadius;   // bounding-sphere radius about the origin; bounds the 
 uniform float uLandscape;// 1 = the body is turned 90 degrees; swaps the display uv
 uniform float uBandTone; // antenna band vs the rail, per finish - see TABLET_BAND
 uniform vec3  uFinish;
+uniform float uLight;    // overall studio light, 1 = the calibrated rig - see environment()
 uniform sampler2D uTex;
 uniform float uHasTex;
 uniform float uSrcAspect, uFitMode;
@@ -2523,7 +2548,9 @@ vec3 environment(vec3 d, float rough) {
   col += softbox(d, normalize(vec3( 0.88, 0.12, 0.36)), vec2(0.40, 0.62), vec3(0.86, 0.90, 1.00), 2.6, 0.48, rough);
   col += softbox(d, normalize(vec3( 0.14, 0.58,-0.82)), vec2(0.50, 0.28), vec3(1.00, 0.95, 0.88), 3.0, 0.42, rough);
   col += softbox(d, normalize(vec3(-0.30, 0.34, 0.89)), vec2(0.50, 0.70), vec3(1.0), 3.4, 0.55, rough);
-  return col;
+  // The Lighting slider. One factor on the whole rig, ambient included, so the
+  // softboxes keep their balance; 1.0 leaves every value exactly as calibrated.
+  return col * uLight;
 }
 
 vec3 envSpec(vec3 d, float rough) {
@@ -3773,6 +3800,7 @@ function renderStudio(canvas, W, H) {
     gl.uniform1f(u('uCamZ'), camZ);
     gl.uniform1f(u('uTanHalf'), tanHalf);
     gl.uniform1f(u('uAspect'), VW / VH);
+    gl.uniform1f(u('uLight'), (state.light != null ? state.light : 100) / 100);
     const fin = FINISHES[state.finish] || FINISHES.Silver;
     gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
     gl.uniform1f(u('uPhoneAnt'), PHONE_ANT[state.finish] != null
@@ -3866,6 +3894,7 @@ function renderLaptop(canvas, W, H) {
     gl.uniform1f(u('uCamZ'), camZ);
     gl.uniform1f(u('uTanHalf'), tanHalf);
     gl.uniform1f(u('uAspect'), VW / VH);
+    gl.uniform1f(u('uLight'), (state.light != null ? state.light : 100) / 100);
     gl.uniform1f(u('uRadius'), radius);
     gl.uniform3f(u('uCenter'), center.x, center.y, center.z);
     gl.uniform2f(u('uLidCS'), Math.cos(la), Math.sin(la));
@@ -3960,6 +3989,7 @@ function renderTablet(canvas, W, H) {
     gl.uniform1f(u('uCamZ'), camZ);
     gl.uniform1f(u('uTanHalf'), tanHalf);
     gl.uniform1f(u('uAspect'), VW / VH);
+    gl.uniform1f(u('uLight'), (state.light != null ? state.light : 100) / 100);
     gl.uniform1f(u('uRadius'), radius);
     gl.uniform1f(u('uLandscape'), land ? 1 : 0);
     gl.uniform1f(u('uBandTone'), TABLET_BAND[state.tabletFinish] != null
@@ -4420,6 +4450,13 @@ state.reflect = 55;
 // these controls existed reopens looking the same.
 state.highlight = true;
 state.highlightStrength = 100;
+// Studio lighting as a percentage of the calibrated rig. 100 is that rig exactly,
+// which is also what a mockup saved before the control existed restores to.
+// The slider runs 50-110. The top is measured: the laptop and tablet body
+// tonemap puts the brightest softbox reflection just under white, and the first
+// new clipped pixel over every device, finish and preset appears at 114 (laptop
+// Silver, Side; tablet at 118, phone never). 110 is the last whole 5% below it.
+state.light = 100;
 // Where the design sits inside the display. Part of the output, so it rides
 // along in the saved settings — unlike the preview viewport below.
 state.imgX = 0; state.imgY = 0; state.imgZoom = 100;
@@ -5288,11 +5325,25 @@ function applyAngleUI() {
 const ICONS = {
   tilt: '<path d="M1.5 8H14.5"/><path d="M9.8 3.17A2.8 6.3 0 1 1 6.6 2.54M6.61 5.32L6.6 2.54L3.91 3.25"/>',
   turn: '<path d="M8 1.5V14.5"/><path d="M13.46 9.4A6.3 2.8 0 1 1 12.83 6.2M10.09 6.67L12.83 6.2L11.68 3.67"/>',
-  roll: '<circle cx="8" cy="8" r="1"/><path d="M12.6 4.14A6 6 0 1 1 4.56 3.09M3.73 5.74L4.56 3.09L1.78 2.95"/>'
+  roll: '<circle cx="8" cy="8" r="1"/><path d="M12.6 4.14A6 6 0 1 1 4.56 3.09M3.73 5.74L4.56 3.09L1.78 2.95"/>',
+  info: '<circle cx="8" cy="8" r="6.5"/><path d="M8 7.4V11"/><path d="M8 5V5.05"/>'
 };
 function icon(name) {
   return '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" ' +
          'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
+}
+
+// The Lighting tip. Click pins it through registerPopover, which already closes
+// it on an outside click or Escape. Escape also has to quiet the hover/focus
+// display, or a keyboard user could not dismiss a tip shown by focus alone.
+document.getElementById('lightinfo').innerHTML = icon('info');
+registerPopover('lightinfo', 'lighttip', () => {});
+{
+  const wrap = document.getElementById('lightinfo').parentNode;
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') wrap.classList.add('quiet'); });
+  const wake = () => wrap.classList.remove('quiet');
+  wrap.addEventListener('mouseleave', wake);
+  wrap.addEventListener('focusout', wake);
 }
 
 const DIALS = [['rx', 'Tilt back', -70, 70, 'tilt'], ['ry', 'Turn', -70, 70, 'turn'], ['rz', 'Roll', -45, 45, 'roll']];
@@ -5698,7 +5749,7 @@ document.getElementById('files').addEventListener('change', async (e) => {
 });
 
 // Values borrow Fuse's trailing-digit treatment: the number is solid, the unit fades.
-const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%'],['screenRadius','screenRadiuso','%'],['lid','lido','°']];
+const SLIDERS = [['rx','rxo','°'],['ry','ryo','°'],['rz','rzo','°'],['persp','perspo','%'],['zoom','zoomo','%'],['arx','arxo','°'],['ary','aryo','°'],['arz','arzo','°'],['shadowOpacity','shadowOpacityo','%'],['shadowSoft','shadowSofto','%'],['shadowContact','shadowContacto','%'],['shadowAngle','shadowAngleo','°'],['shadowHeight','shadowHeighto','°'],['photoRadius','photoRadiuso','%'],['imgZoom','imgZoomo','%'],['reflect','reflecto','%'],['highlightStrength','highlightStrengtho','%'],['screenRadius','screenRadiuso','%'],['lid','lido','°'],['light','lighto','%']];
 function setVal(outId, v, unit) {
   document.getElementById(outId).innerHTML = '<b>' + v + '</b><i>' + unit + '</i>';
 }
@@ -6181,6 +6232,10 @@ onmessage = async (event) => {
       // number because syncSliders assigns it to an input value unguarded.
       if (state.highlight === undefined) state.highlight = true;
       if (state.highlightStrength === undefined) state.highlightStrength = 100;
+      // Tested on msg.settings, as laptopFinish is below: Object.assign never removes
+      // a key, so mid-session state.light is always defined and a mockup saved
+      // before the slider existed would inherit whatever the slider was left at.
+      if (msg.settings.light === undefined) state.light = 100;
       // screenNotch was the boolean screenShape replaced. Its presence means the
       // mockup was saved by a build that already had the Screen mode, so it
       // pins the shape actually chosen — false meant rounded, and has to keep
