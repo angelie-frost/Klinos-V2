@@ -3150,16 +3150,19 @@ function buildProgram(fragSrc) {
 // loadLegends has decoded KB_LEGENDS.
 let legendTex = null;
 
+// Compile a device program on first use. A failed build is remembered as false,
+// so a broken shader logs once instead of recompiling on every frame.
+function lazyProgram(cur, src) { return cur === null ? (buildProgram(src) || false) : cur; }
+
 function initGL() {
   if (!gl) return;
   program = buildProgram(FRAG);
   assetProgram = buildProgram(ASSET_FRAG);
   studioProgram = buildProgram(STUDIO_FRAG);
-  laptopProgram = buildProgram(LAPTOP_FRAG);
-  // Eager, with the rest. The documented compile incident is about inlined body
-  // size WITHIN one program, not program count, and this one links in ~0.3s
-  // against the phone's ~1.1s because map() is two prisms.
-  tabletProgram = buildProgram(TABLET_FRAG);
+  // The laptop and tablet programs are not built here: lazyProgram compiles each
+  // the first time its body is drawn. Uncached they cost ~1.7s and ~0.6s, paid at
+  // every plugin start for bodies most sessions never select. The phone stays
+  // eager because it is the default body and draws first.
   backdropProgram = buildProgram(BACKDROP_FRAG);
   screenProgram = buildProgram(SCREEN_FRAG);
   const buf = gl.createBuffer();
@@ -3862,7 +3865,9 @@ function renderLaptop(canvas, W, H) {
   canvas.width = W; canvas.height = H;
   ctx.clearRect(0, 0, W, H);
   if (!state.transparent) { ctx.fillStyle = state.bg; ctx.fillRect(0, 0, W, H); }
-  if (!gl || !laptopProgram) return;
+  if (!gl) return;
+  laptopProgram = lazyProgram(laptopProgram, LAPTOP_FRAG);
+  if (!laptopProgram) return;
 
   const lid = state.lid != null ? state.lid : 110;
   const { center, radius } = laptopFrame(lid);
@@ -3958,7 +3963,9 @@ function renderTablet(canvas, W, H) {
   canvas.width = W; canvas.height = H;
   ctx.clearRect(0, 0, W, H);
   if (!state.transparent) { ctx.fillStyle = state.bg; ctx.fillRect(0, 0, W, H); }
-  if (!gl || !tabletProgram) return;
+  if (!gl) return;
+  tabletProgram = lazyProgram(tabletProgram, TABLET_FRAG);
+  if (!tabletProgram) return;
 
   const land = !!state.tabletLandscape;
   const R = tabletMatrix();
