@@ -280,11 +280,32 @@
   /* Icon baseline — see ICONS in the script. */
   .icon { width: 16px; height: 16px; flex: none; color: var(--ink); }
   .dial .num { display: flex; align-items: center; gap: 2px; font-size: 13px; color: var(--ink-3); }
-  .dial input {
-    width: 52px; padding: 4px 6px; text-align: right;
-    font: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+  /* The border sits on the wrapper so the steppers share the field's box. */
+  .dial .field {
+    display: flex; align-items: stretch; overflow: hidden;
     border: 1px solid var(--line); border-radius: 8px; background: #fff;
   }
+  .dial .field:focus-within { border-color: var(--ink-2); }
+  .dial input {
+    width: 44px; padding: 4px 3px 4px 6px; text-align: right;
+    font: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+    border: 0; outline: none; background: none; appearance: textfield;
+  }
+  /* Chromium only shows its spinners on hover; ours are always there. */
+  .dial input::-webkit-inner-spin-button,
+  .dial input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .dial .step { display: flex; flex-direction: column; width: 16px; border-left: 1px solid var(--line); }
+  .dial .step button {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 0; border: 0; background: none; color: var(--ink-2); cursor: default;
+  }
+  .dial .step button + button { border-top: 1px solid var(--line); }
+  .dial .step button:hover { background: var(--sunk); color: var(--ink); }
+  .dial .step svg { width: 8px; height: 8px; }
+  /* Scrub handles: the label always, the field until it is focused for typing. */
+  .dial .name, .dial input:not(:focus) { cursor: ew-resize; touch-action: none; }
+  .dial .name { user-select: none; }
+  body.scrubbing, body.scrubbing * { cursor: ew-resize !important; user-select: none; }
 
   .footer {
     position: fixed; left: 0; right: 0; bottom: 0;
@@ -5283,7 +5304,56 @@ function dialPoint(deg) {
 function setDialValue(key, v) {
   state[key] = v;
   syncSliders();
-  draw();
+  drawDraft();
+}
+// Nudge a dial by delta, clamped to its range. The steppers and Shift+arrow both
+// come through here, so every x10 path clamps the same way. It writes the field
+// itself because syncDials leaves a focused field alone, and these can run while
+// it has focus.
+function stepBy(key, delta, min, max, num) {
+  const v = Math.max(min, Math.min(max, Math.round(state[key] + delta)));
+  num.value = v;
+  if (v !== state[key]) setDialValue(key, v);
+}
+// Figma's scrub: drag a field or its label sideways, 1 per px, 10 with Shift.
+// A press that moves no more than SCRUB_SLOP px before release is a click, and
+// focuses the field with its text selected so typing replaces it. A field that
+// already has focus is left alone, so a scrub never interrupts an edit. Each
+// move is added to a clamped running total, so reversing off a limit responds
+// at once instead of first unwinding the overshoot.
+const SCRUB_SLOP = 3;
+function scrubbable(el, key, min, max, num) {
+  let drag = null;
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || document.activeElement === num) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    drag = { x0: e.clientX, x: e.clientX, acc: state[key], on: false };
+  });
+  el.addEventListener('pointermove', e => {
+    if (!drag) return;
+    if (!drag.on) {
+      if (Math.abs(e.clientX - drag.x0) <= SCRUB_SLOP) return;
+      // Counted from here, so the slop does not arrive as a jump.
+      drag.on = true; drag.x = e.clientX;
+      document.body.classList.add('scrubbing');
+      return;
+    }
+    drag.acc = Math.max(min, Math.min(max, drag.acc + (e.clientX - drag.x) * (e.shiftKey ? 10 : 1)));
+    drag.x = e.clientX;
+    const v = Math.round(drag.acc);
+    if (v !== state[key]) setDialValue(key, v);
+  });
+  const end = e => {
+    if (!drag) return;
+    const click = !drag.on && e.type === 'pointerup';
+    drag = null;
+    document.body.classList.remove('scrubbing');
+    if (click) { num.focus(); num.select(); }
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('lostpointercapture', end);
 }
 DIALS.forEach(([key, label, min, max, glyph]) => {
   const wrap = document.createElement('div');
@@ -5328,9 +5398,48 @@ DIALS.forEach(([key, label, min, max, glyph]) => {
   });
   // Typing skips the rewrite (see syncDials); this puts the clamped value back.
   num.addEventListener('change', syncDials);
+  // Plain arrows stay native; Shift steps by 10, as the steppers and scrub do.
+  num.addEventListener('keydown', e => {
+    if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    stepBy(key, e.key === 'ArrowUp' ? 10 : -10, min, max, num);
+  });
+  scrubbable(num, key, min, max, num);
+  scrubbable(name, key, min, max, num);
+
+  // Always-visible steppers. Out of the tab order: the field's own arrow keys
+  // cover the keyboard. Pressing one keeps focus in the field if it has it.
+  const step = document.createElement('span');
+  step.className = 'step';
+  [[1, 'Increase', 'M2 5L4 3L6 5'], [-1, 'Decrease', 'M2 3L4 5L6 3']].forEach(([dir, verb, d]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.tabIndex = -1;
+    b.setAttribute('aria-label', verb + ' ' + label);
+    b.innerHTML = '<svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.25" ' +
+                  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"/></svg>';
+    // Hold to repeat, on the native spinner's timing.
+    let timer = null;
+    const stop = () => { clearTimeout(timer); clearInterval(timer); timer = null; };
+    b.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      b.setPointerCapture(e.pointerId);
+      const delta = dir * (e.shiftKey ? 10 : 1);
+      stepBy(key, delta, min, max, num);
+      stop();
+      timer = setTimeout(() => { timer = setInterval(() => stepBy(key, delta, min, max, num), 60); }, 400);
+    });
+    b.addEventListener('pointerup', stop);
+    b.addEventListener('pointercancel', stop);
+    b.addEventListener('lostpointercapture', stop);
+    step.appendChild(b);
+  });
+  const field = document.createElement('span');
+  field.className = 'field';
+  field.appendChild(num); field.appendChild(step);
   const numWrap = document.createElement('span');
   numWrap.className = 'num';
-  numWrap.appendChild(num);
+  numWrap.appendChild(field);
   numWrap.appendChild(document.createTextNode('\u00b0'));
 
   wrap.appendChild(svg); wrap.appendChild(name); wrap.appendChild(numWrap);
