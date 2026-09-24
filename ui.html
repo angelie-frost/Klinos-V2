@@ -1335,15 +1335,29 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // brightens in this environment. Do not retry that without new evidence.
   float raa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
   float sideA = 1.0 - smoothstep(0.93, 0.99, abs(n.z));
-  // The rails are NOT symmetric. A full-length scan of the +x rail finds the
-  // top band and nothing in the bottom 20mm - max residual 0.0-0.2 sd against a
-  // clearly detected top band in the same scan at the same resolution, so the
-  // detector works there and this is a real absence, not a miss. Top band on
-  // both rails, bottom band on -x only.
-  float minusX = smoothstep(0.10, 0.45, -n.x);
+  // Both bands are on BOTH rails. This replaces an earlier -x-only gate on the
+  // bottom band, and it was RE-VERIFIED rather than carried over: that gate came
+  // from a scan made while this feature's position and sign were both still
+  // wrong, so it was re-examined from scratch.
+  //
+  // The 8 px/mm reference shows both rails - its upper device carries the side
+  // button alone (+x), its lower one the ring switch and both volume buttons
+  // (-x). Raw luminance, no detrending, finds a band 13.25-14.00mm from EVERY
+  // one of the four ends: +x reads 26.5 against ~35 at one end and 56.6 against
+  // ~31 at the other, -x reads 27.3 against ~40 and 60.3 against ~35. The sign
+  // flips between ends because the insert is specular, which is this feature's
+  // known behaviour, not two different features. All four pass the edge test as
+  // material steps - 0.250 to 0.998mm against that photo's 2.121mm blur limit,
+  // where a true shading gradient measures well ABOVE its limit (the known
+  // curvature one measures 3.901mm against 0.495mm).
+  //
+  // Those 13.25-14.00mm figures are measured from the SILHOUETTE end, which
+  // carries a projection offset - they are not object-space coordinates and
+  // ANT_TOP/ANT_BOT are not derived from them. Presence, symmetry and edge
+  // character are what this measurement establishes, and those need no datum.
   float antA = sideA * max(
       1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_TOP)),
-      minusX * (1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT))));
+      1.0 - smoothstep(ANT_HW - raa, ANT_HW + raa, abs(p.y - ANT_BOT)));
   vec3 metal = envSpec(r, mix(ROUGH_BODY, ROUGH_LIP, lipA)) * F
              + envSpec(nw, 0.95) * uFinish * (1.0 - F) * BODY_K;
   metal *= mix(1.0, uPhoneAnt, antA);
