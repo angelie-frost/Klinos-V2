@@ -2864,12 +2864,20 @@ const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
 
 // Camera plateau, as an outline only: Studio never shows the back, so all it
 // contributes is the thickening at the top of the back edge at steep turns.
-// ALL ESTIMATE - no reference views it square enough to measure: its length
-// from the lineup's vertical (a turned, pitched view), the rest chosen to read
-// as a step. Built as the body outline cut off below PLAT_L, so it is flush with
+// Its length, corner radius and edge are ESTIMATE - no reference views them
+// square enough to measure: the length from the lineup's vertical (a turned,
+// pitched view), the rest chosen to read as a step.
+// PLAT_PROUD is MEASURED FROM APPLE PRODUCT-PAGE RENDER (pass 2's flat top-edge
+// view): body plus plateau 58.07 px against the body alone 44.73 px in the
+// flat bottom view, same camera, scaled on the published 8.75 mm depth - 2.61
+// mm, standard error 0.007. Taken as a RATIO of two silhouettes because both
+// read 3.9% low against the USB-C scale on that face; scaling the top view's
+// silhouette on the USB-C alone gives 2.17 and carries that bias. It was 1.50
+// (ESTIMATE) in pass 1.
+// Built as the body outline cut off below PLAT_L, so it is flush with
 // the rails (unibody) and its top corners follow CORNER; its slab starts inside
 // the body's flat rail zone so the union leaves no crease.
-const float PLAT_L = 47.8, PLAT_PROUD = 1.50, PLAT_R = 4.0, PLAT_E = 0.60;
+const float PLAT_L = 47.8, PLAT_PROUD = 2.60, PLAT_R = 4.0, PLAT_E = 0.60;
 const float PLAT_T = PLAT_PROUD + EDGE + 0.5;
 const float PLAT_CZ = -(D * 0.5 + PLAT_PROUD - PLAT_T * 0.5);
 const float PLAT_CY = H * 0.5 - PLAT_L * 0.5;
@@ -4005,11 +4013,11 @@ function mul3(a, b) {
 // The iPhone 17 Pro, millimetres: PHONE17_FRAG's constants, hand-kept here as
 // TABLET is. DW/DH are the published display (1206x2622 at 460 ppi); E is the
 // rail edge (ESTIMATE) that the sweep reflection's prism uses.
-const PHONE17 = { W: 71.9, H: 150.0, D: 8.75, R: 14.2, E: 1.30, DW: 66.592, DH: 144.776, PROUD: 1.50 };
+const PHONE17 = { W: 71.9, H: 150.0, D: 8.75, R: 14.2, E: 1.30, DW: 66.592, DH: 144.776, PROUD: 2.60 };
 // Bounding sphere about the origin, with the plateau's protrusion on the depth.
 const PHONE17_RADIUS = Math.hypot(Math.hypot(PHONE17.W / 2, PHONE17.H / 2), PHONE17.D / 2 + PHONE17.PROUD);
 function phone17Shown() { return state.mode === 'studio' && state.studioDevice === 'phone17'; }
-// The slab's two outline rings. The plateau is left out: it adds 1.5 mm to the
+// The slab's two outline rings. The plateau is left out: it adds 2.6 mm to the
 // back over the top third, which moves neither the shadow hull nor the floor
 // enough to see.
 function phone17Outline3D(steps) {
