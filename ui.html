@@ -2864,9 +2864,9 @@ const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
 
 // Camera plateau, as an outline only: Studio never shows the back, so all it
 // contributes is the thickening at the top of the back edge at steep turns.
-// Its length, corner radius and edge are ESTIMATE - no reference views them
+// Its length and bottom-corner radius are ESTIMATE - no reference views them
 // square enough to measure: the length from the lineup's vertical (a turned,
-// pitched view), the rest chosen to read as a step.
+// pitched view), the radius chosen to read as a step.
 // PLAT_PROUD is MEASURED FROM APPLE PRODUCT-PAGE RENDER (pass 2's flat top-edge
 // view): body plus plateau 58.07 px against the body alone 44.73 px in the
 // flat bottom view, same camera, scaled on the published 8.75 mm depth - 2.61
@@ -2874,10 +2874,24 @@ const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
 // read 3.9% low against the USB-C scale on that face; scaling the top view's
 // silhouette on the USB-C alone gives 2.17 and carries that bias. It was 1.50
 // (ESTIMATE) in pass 1.
-// Built as the body outline cut off below PLAT_L, so it is flush with
-// the rails (unibody) and its top corners follow CORNER; its slab starts inside
-// the body's flat rail zone so the union leaves no crease.
-const float PLAT_L = 47.8, PLAT_PROUD = 2.60, PLAT_R = 4.0, PLAT_E = 0.60;
+// It is INSET from the rails, not flush with them. Pass 1 built it flush
+// (an ESTIMATE), which made its side wall the rail plane continued - lit
+// exactly like the rail, so at 3/4 poses it read as one flat surface with
+// only a notch in the outline. Apple's 3/4 view shows a bright rim, a darker
+// wall and a junction line instead. MEASURED:
+//   PLAT_INSET 3.4 - the wall's base, 3.4-3.7 mm in from the rail on the flat
+//     top-edge view, and 3.3 mm on the back view (as a ratio to its width,
+//     so that view's doubtful scale does not enter). The top end is taken
+//     as the same (ESTIMATE: the side views put it at 2-4 mm, too soft).
+//   PLAT_E 1.30 - the wall narrows from 3.4-3.7 to ~5.0 mm in across its
+//     top edge on the same top view.
+// So the body's own back-edge round runs unbroken all round the plateau, and
+// the wall meets the flat back in a crease - the junction line comes from
+// the geometry, nothing is painted. Built as the body outline offset inward
+// by PLAT_INSET (concentric corners), cut off below PLAT_L; its slab starts
+// inside the body so the union leaves no seam underneath.
+const float PLAT_L = 47.8, PLAT_PROUD = 2.60, PLAT_R = 4.0, PLAT_E = 1.30;
+const float PLAT_INSET = 3.4;
 const float PLAT_T = PLAT_PROUD + EDGE + 0.5;
 const float PLAT_CZ = -(D * 0.5 + PLAT_PROUD - PLAT_T * 0.5);
 const float PLAT_CY = H * 0.5 - PLAT_L * 0.5;
@@ -2972,8 +2986,9 @@ float sdPrism(vec3 p, vec2 halfWH, float corner, float halfD, float edge) {
 
 
 float sdPlateau(vec3 p) {
-  float d2 = max(sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - PLAT_E, CORNER - PLAT_E),
-                 sdRRect(p.xy - vec2(0.0, PLAT_CY), vec2(W * 0.5, PLAT_L * 0.5) - PLAT_E, PLAT_R - PLAT_E));
+  float d2 = max(sdRRect(p.xy, vec2(W * 0.5, H * 0.5) - PLAT_INSET - PLAT_E, CORNER - PLAT_INSET - PLAT_E),
+                 sdRRect(p.xy - vec2(0.0, PLAT_CY), vec2(W * 0.5 - PLAT_INSET, PLAT_L * 0.5) - PLAT_E,
+                         PLAT_R - PLAT_E));
   float wz = abs(p.z - PLAT_CZ) - (PLAT_T * 0.5 - PLAT_E);
   return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - PLAT_E;
 }
@@ -3038,8 +3053,9 @@ float cavityVis(vec3 p) {
   return clamp(ap * ap / (ap * ap + depth * depth), 0.0, 1.0);
 }
 
-// Checked offline before porting: flush with the rails at mid-plateau (|sd| under
-// 0.002 mm across the rail), the step exactly PLAT_PROUD, the front within 0.39 mm
+// Checked offline before porting: the plateau's wall 3.400 mm in from the rail
+// at its base with the body's back-edge round untouched beside it (0 difference
+// from the body alone), the step exactly PLAT_PROUD, the front within 0.39 mm
 // of every measured edge. Pass 2 likewise: every button's proud, span and
 // width to 0.002 mm of the constants and on the flat rail; the port 8.50 x
 // 2.67 centred to 0.0000 and 5.00 deep; 5 holes a side at 2.267 pitch from
