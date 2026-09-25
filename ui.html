@@ -2857,10 +2857,13 @@ const float DI_HW = 10.78, DI_HH = 3.60, DI_CY = H * 0.5 - 8.29;
 
 // Same material as the tablet and laptop, deliberately unchanged. uFinish is F0.
 // The finishes are fitted to the rails, which are this aluminium - see
-// PHONE17_FINISHES in JS.
+// PHONE17_FINISHES in JS. The tone step is NOT the same - see encodeBody.
 const float ROUGH_BODY = 0.55;
 const float BODY_K = 0.52;
-const float BODY_EXPOSURE = 0.425, BODY_WHITE = 1.6;
+// 17 Pro only: BODY_WHITE 1.6 -> 2.0 is the softer shoulder that lets Cosmic
+// Orange's red run at F0 1.0 unclipped; BODY_EXPOSURE 0.425 x 1.0628 holds
+// Silver's median (144,145,143 -> 145,145,143) under it.
+const float BODY_EXPOSURE = 0.4517, BODY_WHITE = 2.0;
 
 // Camera plateau, as an outline only: Studio never shows the back, so all it
 // contributes is the thickening at the top of the back edge at steep turns.
@@ -3147,12 +3150,20 @@ vec2 envBRDF(float rough, float ndv) {
   return vec2(-1.04, 1.04) * a004 + r.zw;
 }
 
-// Body tonemap, verbatim from LAPTOP_FRAG. Chassis only - encode() still tones
-// the glass reflection, so the design never passes through the HDR curve.
+// Body tonemap: LAPTOP_FRAG's curve, applied to the BRIGHTEST CHANNEL with the
+// colour scaled along with it, instead of to each channel separately, so hue
+// ratios survive the tone step exactly. Per channel, a saturated finish has its
+// brightest channel compressed hardest and drifts toward its others - Cosmic
+// Orange read R/G 1.859 against the reference's 1.954; this gives 1.922 with
+// Silver held. Neutral finishes barely notice. 17 Pro only: the laptop and
+// tablet keep the per-channel form, and their finishes are near-neutral.
+// Chassis only - encode() still tones the glass reflection, so the design
+// never passes through the HDR curve.
 vec3 encodeBody(vec3 c) {
   vec3 x = c * BODY_EXPOSURE;
-  return pow(clamp(x * (1.0 + x / (BODY_WHITE * BODY_WHITE)) / (1.0 + x), 0.0, 1.0),
-             vec3(1.0 / 2.2));
+  float m = max(max(x.r, x.g), x.b);
+  float t = m * (1.0 + m / (BODY_WHITE * BODY_WHITE)) / (1.0 + m);
+  return pow(clamp(x * (m > 1e-6 ? t / m : 1.0), 0.0, 1.0), vec3(1.0 / 2.2));
 }
 
 vec4 shadeRay(vec2 fc, out float edge) {
@@ -4234,22 +4245,24 @@ const TABLET_BAND = { 'Space Black': 0.262, Silver: 0.755 };
 // rail medians Silver (190,191,190), Cosmic Orange (211,108,44), Deep Blue (59,65,83),
 // matched on R/G and B/G, with each finish's level set as its lineup ratio to
 // Silver and Silver's own F0 luminance held at the calibrated aluminium Silver's.
-// Measured over every preset plus turned views, on chassis pixels only:
-//   Silver     R/G 0.993 B/G 0.993 (target 0.995 0.995)
-//   Deep Blue  R/G 0.896 B/G 1.292 (target 0.908 1.277), level 0.104 (0.103)
-//   Orange     R/G 1.872 B/G 0.385 (target 1.954 0.407), level 0.407 (0.477)
-// Cosmic Orange is a compromise, ACCEPTED as such, not an unfinished fit. The
-// unconstrained fit wants red above F0 = 1.0 - the split-sum white term adds
-// the same to every finish at grazing, so its rail red cannot reach the photo's
-// 11% above Silver's - and at 1.0 it clipped 47k red px at the DEFAULT light.
-// Red is capped at 0.90, the highest value with no clipping at 100%, with G and
-// B scaled with it: the hue holds (R/G 1.872 against 1.840 at 1.0) and the cost
-// is level, 0.407 of Silver against the photo's 0.477. A per-finish tone could
-// close that but would bring the red clipping straight back.
+// Measured with the brightest-channel tone step (see encodeBody), over every
+// preset plus turned views, on chassis pixels only:
+//   Silver     R/G 1.000 B/G 0.986 (target 0.995 0.995), median held 145,145,143
+//   Deep Blue  R/G 0.915 B/G 1.319 (target 0.908 1.277), level 0.102 (0.103)
+//   Orange     R/G 1.922 B/G 0.377 (target 1.954 0.407), level 0.414 (0.477)
+// Orange's red is back at F0 1.0 (the per-channel step capped it at 0.90 to
+// avoid clipping); the softer shoulder keeps it clean. Deep Blue is scaled 4%
+// to hold its level; its B/G moved 1.298 -> 1.319, because the per-channel step
+// had been desaturating its blue toward the target by accident - a full refit
+// lands at 1.319 too, so nothing better is available.
+// Orange's LEVEL is PARKED, not closed: 0.414 against the reference's 0.477.
+// Neither a tone step nor a physical oxide-coat reflection (F0 0.04-0.08)
+// reaches it, and the target comes from renders whose own tone curve likely
+// inflates it - it needs a real photograph to calibrate against.
 const PHONE17_FINISHES = {
   Silver: [0.889, 0.861, 0.756],
-  'Cosmic Orange': [0.900, 0.138, 0.012],
-  'Deep Blue': [0.032, 0.040, 0.071]
+  'Cosmic Orange': [1.000, 0.153, 0.013],
+  'Deep Blue': [0.0307, 0.0384, 0.0682]
 };
 // Antenna band and the Camera Control's outline, as LINEAR multipliers on
 // the chassis before encodeBody - the tablet's TABLET_BAND method. Targets are
@@ -4261,12 +4274,12 @@ const PHONE17_FINISHES = {
 // against untoned (AA edges eroded away), at six rail poses (Tilt 0/+-20, Turn
 // +-70); per finish the band clusters within 0.022, so one constant each is
 // well defined, not pose-dependent. The outline is solved the same way at
-// 2.5x zoom, where the 0.25 mm line is wide enough to have a core: within
-// 0.006 over four right-rail poses.
+// 2.5x zoom, where the 0.25 mm line is wide enough to have a core. Re-solved
+// for the brightest-channel tone step: band within 0.013, outline 0.009.
 const PHONE17_TONES = {
-  Silver: [0.562, 0.190],
-  'Cosmic Orange': [0.578, 0.200],
-  'Deep Blue': [0.607, 0.212]
+  Silver: [0.550, 0.181],
+  'Cosmic Orange': [0.548, 0.180],
+  'Deep Blue': [0.605, 0.213]
 };
 // Chip swatches: the lineup's rail medians.
 const PHONE17_FINISH_TILES = { Silver: '#BEBFBE', 'Cosmic Orange': '#D36C2C', 'Deep Blue': '#3B4153' };
@@ -5099,14 +5112,16 @@ state.highlightStrength = 100;
 // Which reflections a surface can pick up depends on its curvature, so a new
 // device must get its own clipping sweep before it takes a maximum - 110 does
 // not transfer, any more than the material model was assumed to. The iPhone 17
-// Pro proved it: its rounder rails clip from 102-103 even with the calibrated
-// Silver, so it gets PHONE17_LIGHT_MAX. lightMax() is the only place a body's
-// maximum is chosen; add a device there, with its sweep, not by default.
-// Measured on the 17 Pro over 81 poses (presets plus Tilt x Turn x Roll), all
-// three finishes: clean at 101; first clipped pixel at 102 (Cosmic Orange, 729
-// red px) and 103 (Silver, 690); 110 clips 40k (Silver) and 64k (Orange). By
-// the same last-whole-5%-step rule as the others: 100.
-const PHONE17_LIGHT_MAX = 100;
+// Pro proved it: its rounder rails clipped from 102-103 even with the
+// calibrated Silver, so it gets PHONE17_LIGHT_MAX. lightMax() is the only place
+// a body's maximum is chosen; add a device there, with its sweep, not by default.
+// The maximum also follows the TONE STEP, not only the shape: with the 17 Pro's
+// brightest-channel step and softer shoulder (see encodeBody), re-swept over 81
+// poses (presets plus Tilt x Turn x Roll), all three finishes: clean through
+// 108; first clipped pixel at 109 (Cosmic Orange, 98 red px); 110 clips 663.
+// Under the old per-channel step it was 102 (Orange) / 103 (Silver), so 100.
+// By the same last-whole-5%-step rule as the others: 105.
+const PHONE17_LIGHT_MAX = 105;
 function lightMax() { return phone17Shown() ? PHONE17_LIGHT_MAX : 110; }
 // Puts the slider's range and value in line with the current body. Called from
 // applyMode, which runs on every device switch, mode change and restore. Writes
