@@ -2834,7 +2834,7 @@ uniform float uHasTex;
 uniform float uSrcAspect, uFitMode;
 uniform vec2  uImgPan;
 uniform float uImgZoom;
-uniform vec3  uP17Tone;  // antenna band, Camera Control crystal, its ring - see PHONE17_TONES
+uniform vec2  uP17Tone;  // antenna band, Camera Control outline - see PHONE17_TONES
 
 const float W = 71.9, H = 150.0, D = 8.75;  // published
 // MEASURED FROM STYLIZED RENDER: a circular fit to the hero's outline, 14.39 mm
@@ -2920,11 +2920,22 @@ const float VOL2_CY = H * 0.5 - 62.765;     // 56.82-68.71, 2.80 mm outline gap
 const float SIDE_CY = H * 0.5 - 55.515, SIDE_HL = 9.235 - BTN_GAP; // 46.28-64.75
 
 // Camera Control: FLUSH - 0.00 +-0.02 mm on the second render's front
-// silhouette and no bump on its back - so paint, not geometry. A smooth
-// crystal inside a dark ring; both stadiums measured on the same side view.
-const float CC_CY = H * 0.5 - 100.10;       // crystal 91.49-108.55, ring 90.57-109.74
-const float CC_HL = 8.53, CC_HZ = 1.245;    // crystal, 2.49 mm across
-const float CC_OHL = 9.58, CC_OHZ = 1.925;  // ring outer edge, 3.85 mm across
+// silhouette and no bump on its back - so paint, not geometry: a hairline on
+// its outer outline, measured on the flat side view (90.57-109.74 mm from the
+// top, 3.85 mm across), and nothing inside it.
+// The first version painted the crystal at 0.85 of the rail inside a 0.7-1.2
+// mm dark ring, and read as a dark block. Both were misreadings of that one
+// flat view: in the 3/4 reference (the pose closest to Studio's) the crystal
+// is the rail's own tone (1.02), and the ring zone is a 1 px dark gap plus a
+// bright bevel, whose average is near the rail's - 0.50 was the gap line's
+// level alone. The bevel highlight is not painted: a fixed highlight would
+// ignore the light, and a multiplier above 1 could clip. If a stronger edge
+// is ever wanted, the honest route is a shallow recessed bevel as geometry
+// (the flat view's dark-one-side, bright-other edge is a recess's signature),
+// but its depth is unmeasured.
+const float CC_CY = H * 0.5 - 100.10;
+const float CC_OHL = 9.58, CC_OHZ = 1.925;  // outer outline, 3.85 mm across
+const float CC_LINE = 0.25;                 // the 1 px gap line at ~3 px/mm; cf. BTN_GAP
 
 // Antenna bands, two a rail, MEASURED as above: centres 15.23 / 15.51 mm from
 // the top (left / right) and 12.31 / 12.47 from the bottom, 1.63-1.82 wide, so
@@ -3218,10 +3229,9 @@ vec4 shadeRay(vec2 fc, out float edge) {
   metal *= mix(1.0, uP17Tone.x, bandA);
   float onR = smoothstep(0.55, 0.80, n.x);
   vec2 cq = vec2(p.y - CC_CY, p.z);
-  float crysA = onR * (1.0 - smoothstep(-baa, baa, sdRRect(cq, vec2(CC_HL, CC_HZ), CC_HZ)));
-  float ringA = onR * (1.0 - smoothstep(-baa, baa, sdRRect(cq, vec2(CC_OHL, CC_OHZ), CC_OHZ)))
-              - crysA;
-  metal *= mix(1.0, uP17Tone.y, crysA) * mix(1.0, uP17Tone.z, max(ringA, 0.0));
+  float lineA = onR * (1.0 - smoothstep(CC_LINE * 0.5 - baa, CC_LINE * 0.5 + baa,
+                                      abs(sdRRect(cq, vec2(CC_OHL, CC_OHZ), CC_OHZ))));
+  metal *= mix(1.0, uP17Tone.y, lineA);
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFront;
   metal *= mix(1.0, HAIR_K, seam);
 
@@ -4209,20 +4219,22 @@ const PHONE17_FINISHES = {
   'Cosmic Orange': [0.900, 0.138, 0.012],
   'Deep Blue': [0.032, 0.040, 0.071]
 };
-// Antenna band, Camera Control crystal and its ring, as LINEAR multipliers on
+// Antenna band and the Camera Control's outline, as LINEAR multipliers on
 // the chassis before encodeBody - the tablet's TABLET_BAND method. Targets are
 // sRGB ratios against the rail, MEASURED on Cosmic Orange in the side views:
-// band 0.80 (0.793-0.890 over four bands, median taken), crystal 0.85, ring
-// 0.50. Silver and Deep Blue have no reference, so they are ESTIMATE: the
+// band 0.80 (0.793-0.890 over four bands, median taken), outline 0.50 (its
+// gap line). Silver and Deep Blue have no reference, so they are ESTIMATE: the
 // same sRGB targets, which is what a single insert material would give.
 // Each multiplier is solved on the GPU against that target, same pixels toned
 // against untoned (AA edges eroded away), at six rail poses (Tilt 0/+-20, Turn
-// +-70); per finish they cluster within 0.022 (band), 0.009 (crystal) and
-// 0.001 (ring), so one constant each is well defined, not pose-dependent.
+// +-70); per finish the band clusters within 0.022, so one constant each is
+// well defined, not pose-dependent. The outline is solved the same way at
+// 2.5x zoom, where the 0.25 mm line is wide enough to have a core: within
+// 0.006 over four right-rail poses.
 const PHONE17_TONES = {
-  Silver: [0.562, 0.665, 0.189],
-  'Cosmic Orange': [0.578, 0.677, 0.200],
-  'Deep Blue': [0.607, 0.684, 0.211]
+  Silver: [0.562, 0.190],
+  'Cosmic Orange': [0.578, 0.200],
+  'Deep Blue': [0.607, 0.212]
 };
 // Chip swatches: the lineup's rail medians.
 const PHONE17_FINISH_TILES = { Silver: '#BEBFBE', 'Cosmic Orange': '#D36C2C', 'Deep Blue': '#3B4153' };
@@ -4597,7 +4609,7 @@ function renderPhone17(canvas, W, H) {
     gl.uniform1f(u('uRadius'), radius);
     gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
     const tone = PHONE17_TONES[state.phone17Finish] || PHONE17_TONES['Cosmic Orange'];
-    gl.uniform3f(u('uP17Tone'), tone[0], tone[1], tone[2]);
+    gl.uniform2f(u('uP17Tone'), tone[0], tone[1]);
     gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
     gl.uniform1f(u('uSrcAspect'), srcAspect);
     gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
