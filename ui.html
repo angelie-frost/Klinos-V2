@@ -3239,7 +3239,23 @@ vec4 shadeRay(vec2 fc, out float edge) {
   // Antenna bands and Camera Control: measured tones, per finish, as the
   // tablet's band - see PHONE17_TONES. Rail-local footprint, as the tablet.
   float baa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
-  float bandA = smoothstep(0.55, 0.80, abs(n.x))
+  // The band crosses the metal and stops at the glass, as the iPhone 13's does:
+  // the 13's own rule, excluding only the flat faces. The GSMArena front shows
+  // the top band on the rim's outer 0.6-1.1 mm and not one column further in;
+  // the 42-degree 3/4 view shows both bands across the rim's 2-3 columns and
+  // nothing on the glass border beside it. Here the front metal is the rail's
+  // round running into the 1 mm rim, so this reaches 0.9 mm in fully and fades
+  // to 0.2 exactly where the glass starts (LIP_W); the rail-only mask it
+  // replaces gave out 0.45 mm in, 0.55 mm short. It takes in the back round too,
+  // which the flat side views show carrying the band.
+  // KNOWN, ACCEPTED APPROXIMATION, as on the 13: the rim takes the rail's tone.
+  // Its own tone does not resolve - 4.3 px/mm at best, 0.60-0.94 across views
+  // and columns, flipping to 1.12-1.22 on the round in the side views. On the
+  // plateau the rail-only mask is kept exactly: nothing shows whether the band
+  // crosses its rounded top edge, so that is not extended.
+  float bandSide = sdPlateau(p) < 0.05 ? smoothstep(0.55, 0.80, abs(n.x))
+                                       : 1.0 - smoothstep(0.93, 0.99, abs(n.z));
+  float bandA = bandSide
               * (1.0 - smoothstep(ANT_HW - baa, ANT_HW + baa,
                                   min(abs(p.y - ANT_TOP), abs(p.y - ANT_BOT))));
   metal *= mix(1.0, uP17Tone.x, bandA);
