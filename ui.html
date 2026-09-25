@@ -2795,15 +2795,27 @@ void main() {
 // only, and the front's display and Dynamic Island. Studio's dials stop at +-70
 // degrees, so the back never faces the camera - no lenses, no flash or LiDAR,
 // no back-glass material, because nothing in range would ever show them.
-// Buttons, antenna lines and ports wait for a side profile or a drawing.
+// Pass 2 added the side buttons, Camera Control, the antenna bands and the
+// bottom edge from flat edge-on views on Apple's product page.
 //
-// Every dimension carries its provenance, in three kinds:
+// Every dimension carries its provenance, in four kinds:
 //   published                         - Apple's spec page
 //   MEASURED FROM STYLIZED RENDER     - measured on the front hero image, a
 //                                       render rather than a photo: a real
 //                                       measurement, with a render's own
 //                                       uncertainty (it sits 1.1% off spec
 //                                       proportions), held to the same 0.5 mm gate
+//   MEASURED FROM APPLE PRODUCT-PAGE RENDER, KEYSTONE-CORRECTED
+//                                     - the flat side views: renders again, at
+//                                       4.44 px/mm with edges sharp to 0.27 mm,
+//                                       but shot by a pitched camera - the rails
+//                                       narrow 5.7-6.3% top to bottom, and read
+//                                       uniformly every button lands 3-4 mm low.
+//                                       A 1D projective correction calibrated on
+//                                       the side button's bump in a second render
+//                                       (the GSMArena front) agrees with it to
+//                                       0.4 mm and predicts the silhouettes' own
+//                                       taper (1.0685 against 1.057-1.065)
 //   ESTIMATE                          - not measured; chosen, and says from what
 const PHONE17_FRAG = `
 precision highp float;
@@ -2822,6 +2834,7 @@ uniform float uHasTex;
 uniform float uSrcAspect, uFitMode;
 uniform vec2  uImgPan;
 uniform float uImgZoom;
+uniform vec3  uP17Tone;  // antenna band, Camera Control crystal, its ring - see PHONE17_TONES
 
 const float W = 71.9, H = 150.0, D = 8.75;  // published
 // MEASURED FROM STYLIZED RENDER: a circular fit to the hero's outline, 14.39 mm
@@ -2860,6 +2873,73 @@ const float PLAT_L = 47.8, PLAT_PROUD = 1.50, PLAT_R = 4.0, PLAT_E = 0.60;
 const float PLAT_T = PLAT_PROUD + EDGE + 0.5;
 const float PLAT_CZ = -(D * 0.5 + PLAT_PROUD - PLAT_T * 0.5);
 const float PLAT_CY = H * 0.5 - PLAT_L * 0.5;
+
+// --- side hardware ----------------------------------------------------------
+// Buttons are unioned onto the rails and the bottom cuts subtracted, by the
+// tablet's and the phone's constructions unchanged in form. Action and both
+// volume buttons are on -x, the side button and Camera Control on +x: the
+// front view carries the side button on its right edge.
+//
+// Positions are MEASURED FROM APPLE PRODUCT-PAGE RENDER, KEYSTONE-CORRECTED,
+// outline to outline (gap centre to gap centre), in mm from the top end.
+// The body is the outline less BTN_GAP a side: the side button's bump
+// silhouette on the second render runs 17.70 mm against its outline's 18.47.
+//
+// Right rail: the correction's two estimates (calibrated, and each view's own
+// taper) agree to 0.28-0.30 mm, and the side button checks against a second
+// render to 0.39 mm - inside the 0.5 mm gate.
+// LEFT RAIL MISSES THE STRICT 0.5 mm GATE, built by decision: the same two
+// estimates differ by 0.48-0.67 mm there, and the second render clips that
+// rail at its image border, so nothing independent checks it. Treat the
+// left positions as +-0.7 mm - one common shift, since lengths, the gap and
+// widths are solid whichever estimate holds.
+//
+// Proud: the side button 0.42, a crisp sub-pixel bump on the second render's
+// front silhouette. The left rail 0.52, from its back view only, whose scale
+// is suspect (its aspect fits the Pro Max); a bump in px moves only +-8%
+// across either scale, 0.46-0.58. Real depth that reads at grazing, so
+// geometry, as on the tablet (0.62) and the phone (0.40).
+const float BTN_GAP = 0.28;                 // outline to body, a side
+const float BTN_HZ = 1.50 - BTN_GAP;        // every pill 3.0 mm across the rail
+                                            // outline, centred to 0.1 mm
+const float BTN_OUT = 0.15, BTN_E = 0.18;   // overlap into the rail, edge: the tablet's
+const float L_HX = 0.52 + BTN_OUT;          // left rail: 0.52 proud
+const float R_HX = 0.42 + BTN_OUT;          // side button: 0.42 proud
+const float ACT_CY = H * 0.5 - 33.64, ACT_HL = 3.67 - BTN_GAP;    // 29.97-37.31
+const float VOL_HL = 5.93 - BTN_GAP;        // 11.82 and 11.89 long, one length
+const float VOL1_CY = H * 0.5 - 48.11;      // 42.20-54.02
+const float VOL2_CY = H * 0.5 - 62.765;     // 56.82-68.71, 2.80 mm outline gap
+const float SIDE_CY = H * 0.5 - 55.515, SIDE_HL = 9.235 - BTN_GAP; // 46.28-64.75
+
+// Camera Control: FLUSH - 0.00 +-0.02 mm on the second render's front
+// silhouette and no bump on its back - so paint, not geometry. A smooth
+// crystal inside a dark ring; both stadiums measured on the same side view.
+const float CC_CY = H * 0.5 - 100.10;       // crystal 91.49-108.55, ring 90.57-109.74
+const float CC_HL = 8.53, CC_HZ = 1.245;    // crystal, 2.49 mm across
+const float CC_OHL = 9.58, CC_OHZ = 1.925;  // ring outer edge, 3.85 mm across
+
+// Antenna bands, two a rail, MEASURED as above: centres 15.23 / 15.51 mm from
+// the top (left / right) and 12.31 / 12.47 from the bottom, 1.63-1.82 wide, so
+// symmetric left to right within 0.3 mm and taken as one pair. Real seams by
+// the edge test: 1.4-1.7 px edges against the rail's own curvature gradient
+// of 5.6 px (the control) and a 1.2 px blur limit. No band on either end face -
+// the only line-like features there are 3 mm wide corner highlights.
+// The bottom band sits 0.8-2.8 mm INSIDE the corner arc (the arc turns 3-11
+// degrees there, |n.x| >= 0.982, so the rail mask holds). Rendered where it
+// is by decision; if it smears, the fallback is the iPhone 13's flat-rail rule.
+const float ANT_TOP = H * 0.5 - 15.37, ANT_BOT = -(H * 0.5 - 12.39), ANT_HW = 0.86;
+
+// Bottom edge, left to right grille / screw / USB-C / screw / grille: the
+// phone's own pattern, so its construction carries over with new numbers.
+// MEASURED on the flat bottom view (perspective, but the end face is square to
+// the camera and symmetric about centre to 0.05 px), scaled on the 8.5 mm
+// USB-C opening as the tablet's were; perspective-corrected body width agrees
+// on scale to 1.7%, i.e. 0.35 mm at the outermost hole. Every cut is centred
+// through the thickness to 0.05 mm.
+const float PORT_HW = 4.25, PORT_HZ = 1.335, PORT_DEPTH = 5.0;  // 8.5 x 2.67
+const float SCREW_X = 6.93, SCREW_R = 0.65, SCREW_DEPTH = 0.35;  // the phone's dish
+const float HOLE_R = 0.74, HOLE_SP = 2.267, HOLE_N = 5.0, HOLE_X0 = 11.60, HOLE_DEPTH = 1.2;
+const float CUT_RIM = 0.15;                 // the phone's rim, chosen there by sweep
 float sdRRect(vec2 p, vec2 half_, float r) {
   vec2 q = abs(p) - half_ + r;
   return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
@@ -2879,11 +2959,77 @@ float sdPlateau(vec3 p) {
   return min(max(d2, wz), 0.0) + length(max(vec2(d2, wz), 0.0)) - PLAT_E;
 }
 
+// Polynomial smooth max, identical to max(a, b) once b is more than k below a.
+// The early return is what keeps it exact away from the cuts - see the phone's
+// note on ANGLE/D3D float32 divergence.
+float smax(float a, float b, float k) {
+  if (b < a - k) return a;
+  float h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) + k * h * (1.0 - h);
+}
+
+float cyl(float radial, float axial) {
+  return min(max(radial, axial), 0.0) + length(max(vec2(radial, axial), 0.0));
+}
+
+// Bounds a cut into the -y face, reaching 0.3 below it so the mouth always
+// opens cleanly through the surface.
+float finiteY(float y, float depth) {
+  float yc = -H * 0.5 + (depth - 0.3) * 0.5;
+  return abs(y - yc) - (depth + 0.3) * 0.5;
+}
+
+// The tablet's stadium button, with the rail side and protrusion as arguments.
+float sdButtonX(vec3 p, float side, float cy, float halfLen, float hx) {
+  vec3 q = p - vec3(side * (W * 0.5 - BTN_OUT), cy, 0.0);
+  return sdPrism(vec3(q.y, q.z, q.x), vec2(halfLen, BTN_HZ), BTN_HZ, hx, BTN_E);
+}
+float sdButtons(vec3 p) {
+  float d = sdButtonX(p, -1.0, ACT_CY, ACT_HL, L_HX);
+  d = min(d, sdButtonX(p, -1.0, VOL1_CY, VOL_HL, L_HX));
+  d = min(d, sdButtonX(p, -1.0, VOL2_CY, VOL_HL, L_HX));
+  return min(d, sdButtonX(p, 1.0, SIDE_CY, SIDE_HL, R_HX));
+}
+
+// The phone's bottomCuts verbatim: one hole evaluation for both arrays, |x|
+// folding them together and the cell index CLAMPED so the field stays
+// continuous at the ends. "radial" is the in-plane aperture for cavityVis.
+float bottomCuts(vec3 p, out float radial) {
+  float hx = abs(p.x);
+  float portR = sdRRect(vec2(p.x, p.z), vec2(PORT_HW, PORT_HZ), PORT_HZ);
+  float port  = cyl(portR, finiteY(p.y, PORT_DEPTH));
+  float i = clamp(floor((hx - HOLE_X0) / HOLE_SP + 0.5), 0.0, HOLE_N - 1.0);
+  float holeR = length(vec2(hx - (HOLE_X0 + i * HOLE_SP), p.z)) - HOLE_R;
+  float holes = cyl(holeR, finiteY(p.y, HOLE_DEPTH));
+  float screwR = length(vec2(hx - SCREW_X, p.z)) - SCREW_R;
+  float screws = cyl(screwR, finiteY(p.y, SCREW_DEPTH));
+  radial = min(min(portR, holeR), screwR);
+  return min(min(port, holes), screws);
+}
+float sdBottomCuts(vec3 p) { float radial; return bottomCuts(p, radial); }
+
+// Fraction of the hemisphere a point inside a cut can still see, as the phone:
+// without it the 5 mm socket is lit like the face and reads as a bright plug.
+float cavityVis(vec3 p) {
+  float radial;
+  float cut = bottomCuts(p, radial);
+  if (cut > 0.05) return 1.0;
+  float ap = max(-radial, 0.02);
+  float depth = max(p.y + H * 0.5, 0.0);
+  return clamp(ap * ap / (ap * ap + depth * depth), 0.0, 1.0);
+}
+
 // Checked offline before porting: flush with the rails at mid-plateau (|sd| under
 // 0.002 mm across the rail), the step exactly PLAT_PROUD, the front within 0.39 mm
-// of every measured edge.
+// of every measured edge. Pass 2 likewise: every button's proud, span and
+// width to 0.002 mm of the constants and on the flat rail; the port 8.50 x
+// 2.67 centred to 0.0000 and 5.00 deep; 5 holes a side at 2.267 pitch from
+// 11.600 to 20.668, inside the flat end face (21.56 < 21.75) and clear of the
+// edge round; and wherever no hardware is nearest, the field exactly pass 1's.
 float map(vec3 p) {
-  return min(sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE), sdPlateau(p));
+  float d = min(min(sdPrism(p, vec2(W * 0.5, H * 0.5), CORNER, D * 0.5, EDGE), sdPlateau(p)),
+                sdButtons(p));
+  return smax(d, -sdBottomCuts(p), CUT_RIM);
 }
 vec3 normalAt(vec3 p) {
   vec2 e = vec2(0.035, 0.0);
@@ -3052,6 +3198,22 @@ vec4 shadeRay(vec2 fc, out float edge) {
   vec3 bodyF = uFinish * ab.x + ab.y;
   vec3 specR = envSpec(r, ROUGH_BODY), diffN = envSpec(nw, 0.95);
   vec3 metal = specR * bodyF + diffN * uFinish * max(vec3(0.0), 1.0 - bodyF) * BODY_K;
+  // The port, holes and screw dishes are openings, not decals.
+  metal *= cavityVis(p);
+
+  // Antenna bands and Camera Control: measured tones, per finish, as the
+  // tablet's band - see PHONE17_TONES. Rail-local footprint, as the tablet.
+  float baa = pxmm * 0.75 / max(abs(dot(rd, n)), 0.15);
+  float bandA = smoothstep(0.55, 0.80, abs(n.x))
+              * (1.0 - smoothstep(ANT_HW - baa, ANT_HW + baa,
+                                  min(abs(p.y - ANT_TOP), abs(p.y - ANT_BOT))));
+  metal *= mix(1.0, uP17Tone.x, bandA);
+  float onR = smoothstep(0.55, 0.80, n.x);
+  vec2 cq = vec2(p.y - CC_CY, p.z);
+  float crysA = onR * (1.0 - smoothstep(-baa, baa, sdRRect(cq, vec2(CC_HL, CC_HZ), CC_HZ)));
+  float ringA = onR * (1.0 - smoothstep(-baa, baa, sdRRect(cq, vec2(CC_OHL, CC_OHZ), CC_OHZ)))
+              - crysA;
+  metal *= mix(1.0, uP17Tone.y, crysA) * mix(1.0, uP17Tone.z, max(ringA, 0.0));
   float seam = (1.0 - smoothstep(0.0, HAIR_W + aa, max(dGlass, 0.0))) * onFront;
   metal *= mix(1.0, HAIR_K, seam);
 
@@ -4039,6 +4201,21 @@ const PHONE17_FINISHES = {
   'Cosmic Orange': [0.900, 0.138, 0.012],
   'Deep Blue': [0.032, 0.040, 0.071]
 };
+// Antenna band, Camera Control crystal and its ring, as LINEAR multipliers on
+// the chassis before encodeBody - the tablet's TABLET_BAND method. Targets are
+// sRGB ratios against the rail, MEASURED on Cosmic Orange in the side views:
+// band 0.80 (0.793-0.890 over four bands, median taken), crystal 0.85, ring
+// 0.50. Silver and Deep Blue have no reference, so they are ESTIMATE: the
+// same sRGB targets, which is what a single insert material would give.
+// Each multiplier is solved on the GPU against that target, same pixels toned
+// against untoned (AA edges eroded away), at six rail poses (Tilt 0/+-20, Turn
+// +-70); per finish they cluster within 0.022 (band), 0.009 (crystal) and
+// 0.001 (ring), so one constant each is well defined, not pose-dependent.
+const PHONE17_TONES = {
+  Silver: [0.562, 0.665, 0.189],
+  'Cosmic Orange': [0.578, 0.677, 0.200],
+  'Deep Blue': [0.607, 0.684, 0.211]
+};
 // Chip swatches: the lineup's rail medians.
 const PHONE17_FINISH_TILES = { Silver: '#BEBFBE', 'Cosmic Orange': '#D36C2C', 'Deep Blue': '#3B4153' };
 
@@ -4375,8 +4552,8 @@ function renderTablet(canvas, W, H) {
   ctx.drawImage(scratch, 0, 0);
 }
 
-// The iPhone 17 Pro: renderTablet without the orientation fold or the antenna
-// band, on its own lazily compiled program.
+// The iPhone 17 Pro: renderTablet without the orientation fold, on its own
+// lazily compiled program. Its bands and Camera Control take PHONE17_TONES.
 function renderPhone17(canvas, W, H) {
   const ctx = canvas.getContext('2d');
   canvas.width = W; canvas.height = H;
@@ -4411,6 +4588,8 @@ function renderPhone17(canvas, W, H) {
     gl.uniform1f(u('uLight'), Math.min(state.light != null ? state.light : 100, PHONE17_LIGHT_MAX) / 100);
     gl.uniform1f(u('uRadius'), radius);
     gl.uniform3f(u('uFinish'), fin[0], fin[1], fin[2]);
+    const tone = PHONE17_TONES[state.phone17Finish] || PHONE17_TONES['Cosmic Orange'];
+    gl.uniform3f(u('uP17Tone'), tone[0], tone[1], tone[2]);
     gl.uniform1f(u('uHasTex'), hasTexture ? 1 : 0);
     gl.uniform1f(u('uSrcAspect'), srcAspect);
     gl.uniform1f(u('uFitMode'), FIT_MODES[state.fit] || 0);
